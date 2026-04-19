@@ -1,0 +1,1320 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>工具管理中心 — 英语试卷词频分析器</title>
+<style>
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+:root {
+  --primary: #2563eb; --primary-dk: #1d4ed8; --primary-lt: #dbeafe;
+  --success: #16a34a; --success-lt: #dcfce7;
+  --warn: #d97706; --warn-lt: #fef3c7;
+  --danger: #dc2626; --danger-lt: #fee2e2;
+  --info: #0891b2; --info-lt: #cffafe;
+  --bg: #f1f5f9; --card: #ffffff; --border: #e2e8f0;
+  --text: #1e293b; --muted: #64748b; --radius: 10px;
+  --sidebar: #1e293b; --sidebar-text: #94a3b8; --sidebar-active: #2563eb;
+  --shadow: 0 1px 4px rgba(0,0,0,.08), 0 4px 16px rgba(0,0,0,.06);
+}
+body { font-family: "Segoe UI", "PingFang SC", "Microsoft YaHei", system-ui, sans-serif; background: var(--bg); color: var(--text); min-height: 100vh; display: flex; }
+
+/* ── Login ── */
+#login-overlay { position: fixed; inset: 0; background: #0f172a; display: flex; align-items: center; justify-content: center; z-index: 100; }
+.login-box { background: var(--card); border-radius: 14px; padding: 2.5rem; width: 100%; max-width: 380px; box-shadow: 0 20px 60px rgba(0,0,0,.4); }
+.login-logo { text-align: center; margin-bottom: 1.75rem; }
+.login-logo .icon { font-size: 2.5rem; }
+.login-logo h1 { font-size: 1.3rem; font-weight: 800; margin-top: .5rem; }
+.login-logo p { font-size: .85rem; color: var(--muted); margin-top: .25rem; }
+.fg { margin-bottom: 1rem; }
+.fg label { display: block; font-size: .8rem; font-weight: 600; color: var(--muted); margin-bottom: .35rem; text-transform: uppercase; letter-spacing: .04em; }
+.fg input { width: 100%; padding: .6rem .85rem; border: 1.5px solid var(--border); border-radius: 8px; font-size: .95rem; outline: none; transition: border-color .2s; }
+.fg input:focus { border-color: var(--primary); }
+.err-msg { font-size: .82rem; color: var(--danger); margin-top: .5rem; min-height: 1.2em; }
+
+/* ── Layout ── */
+#app { display: none; width: 100%; }
+.sidebar { width: 240px; min-height: 100vh; background: var(--sidebar); display: flex; flex-direction: column; position: fixed; top: 0; left: 0; bottom: 0; z-index: 10; overflow-y: auto; }
+.sidebar-header { padding: 1.5rem 1.25rem 1rem; border-bottom: 1px solid rgba(255,255,255,.08); }
+.sidebar-header h2 { font-size: 1rem; font-weight: 800; color: #fff; }
+.sidebar-header p { font-size: .72rem; color: var(--sidebar-text); margin-top: .2rem; }
+.sidebar-nav { flex: 1; padding: .75rem 0; }
+.nav-group { padding: .4rem 1.25rem .2rem; font-size: .68rem; font-weight: 700; color: rgba(148,163,184,.5); text-transform: uppercase; letter-spacing: .08em; }
+.nav-item { display: flex; align-items: center; gap: .65rem; padding: .6rem 1.25rem; color: var(--sidebar-text); font-size: .875rem; font-weight: 500; cursor: pointer; border: none; background: none; width: 100%; text-align: left; transition: background .15s; border-radius: 0; }
+.nav-item:hover { background: rgba(255,255,255,.06); color: #fff; }
+.nav-item.active { background: var(--sidebar-active); color: #fff; font-weight: 700; }
+.nav-item .icon { font-size: 1rem; width: 1.25rem; text-align: center; flex-shrink: 0; }
+.sidebar-footer { padding: 1rem 1.25rem; border-top: 1px solid rgba(255,255,255,.08); font-size: .78rem; color: var(--sidebar-text); }
+.sidebar-footer a { color: var(--sidebar-text); text-decoration: none; }
+.sidebar-footer a:hover { color: #fff; }
+
+.main-area { margin-left: 240px; flex: 1; min-height: 100vh; display: flex; flex-direction: column; }
+.topbar { background: var(--card); border-bottom: 1px solid var(--border); padding: .875rem 2rem; display: flex; align-items: center; justify-content: space-between; position: sticky; top: 0; z-index: 5; }
+.topbar h1 { font-size: 1.1rem; font-weight: 800; display: flex; align-items: center; gap: .5rem; }
+.topbar .actions { display: flex; gap: .75rem; align-items: center; }
+.content { padding: 2rem; flex: 1; max-width: 1200px; }
+
+/* ── Cards ── */
+.card { background: var(--card); border: 1px solid var(--border); border-radius: var(--radius); box-shadow: var(--shadow); padding: 1.5rem; margin-bottom: 1.5rem; }
+.card-title { font-size: 1rem; font-weight: 700; margin-bottom: 1.25rem; display: flex; align-items: center; justify-content: space-between; gap: .75rem; }
+.card-title .left { display: flex; align-items: center; gap: .5rem; }
+.section { display: none; }
+.section.active { display: block; }
+
+/* ── Grid ── */
+.stats-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(160px, 1fr)); gap: 1rem; margin-bottom: 1.5rem; }
+.stat-card { background: var(--card); border: 1px solid var(--border); border-radius: var(--radius); padding: 1.25rem; text-align: center; }
+.stat-card .num { font-size: 2rem; font-weight: 800; color: var(--primary); }
+.stat-card .lbl { font-size: .78rem; color: var(--muted); margin-top: .2rem; }
+.grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 1.5rem; }
+.grid-3 { display: grid; grid-template-columns: repeat(3, 1fr); gap: 1.5rem; }
+
+/* ── Buttons ── */
+.btn { display: inline-flex; align-items: center; gap: .4rem; padding: .5rem 1.1rem; border-radius: 7px; font-size: .875rem; font-weight: 600; cursor: pointer; border: none; transition: background .15s, opacity .15s; }
+.btn:disabled { opacity: .5; cursor: not-allowed; }
+.btn-primary { background: var(--primary); color: #fff; }
+.btn-primary:hover:not(:disabled) { background: var(--primary-dk); }
+.btn-success { background: var(--success); color: #fff; }
+.btn-success:hover:not(:disabled) { background: #15803d; }
+.btn-danger { background: var(--danger); color: #fff; }
+.btn-danger:hover:not(:disabled) { background: #b91c1c; }
+.btn-warn { background: var(--warn); color: #fff; }
+.btn-warn:hover:not(:disabled) { background: #b45309; }
+.btn-ghost { background: transparent; border: 1.5px solid var(--border); color: var(--text); }
+.btn-ghost:hover:not(:disabled) { background: var(--bg); }
+.btn-sm { padding: .3rem .75rem; font-size: .8rem; }
+
+/* ── Forms ── */
+.form-row { display: flex; gap: 1rem; align-items: flex-start; flex-wrap: wrap; }
+.form-group { display: flex; flex-direction: column; gap: .35rem; flex: 1; min-width: 200px; }
+.form-group label { font-size: .8rem; font-weight: 600; color: var(--muted); }
+.form-group input, .form-group select, .form-group textarea { padding: .5rem .75rem; border: 1.5px solid var(--border); border-radius: 7px; font-size: .9rem; outline: none; background: var(--card); color: var(--text); transition: border-color .2s; font-family: inherit; }
+.form-group input:focus, .form-group select:focus, .form-group textarea:focus { border-color: var(--primary); }
+.form-group .hint { font-size: .75rem; color: var(--muted); }
+.form-group input[type=range] { padding: 0; border: none; }
+
+/* ── Tables ── */
+.tbl { width: 100%; border-collapse: collapse; font-size: .875rem; }
+.tbl th { text-align: left; padding: .6rem .9rem; background: var(--bg); border-bottom: 2px solid var(--border); font-size: .75rem; font-weight: 700; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; }
+.tbl td { padding: .6rem .9rem; border-bottom: 1px solid var(--border); vertical-align: middle; }
+.tbl tr:last-child td { border-bottom: none; }
+.tbl tr:hover td { background: #f8fafc; }
+
+/* ── Badges ── */
+.badge { display: inline-flex; align-items: center; gap: .25rem; padding: .2rem .55rem; border-radius: 20px; font-size: .72rem; font-weight: 700; }
+.badge-green { background: var(--success-lt); color: var(--success); }
+.badge-red { background: var(--danger-lt); color: var(--danger); }
+.badge-yellow { background: var(--warn-lt); color: var(--warn); }
+.badge-blue { background: var(--primary-lt); color: var(--primary); }
+.badge-gray { background: var(--bg); color: var(--muted); border: 1px solid var(--border); }
+
+/* ── Status dot ── */
+.dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; }
+.dot-green { background: var(--success); }
+.dot-red { background: var(--danger); }
+.dot-yellow { background: var(--warn); }
+
+/* ── Alert / Toast ── */
+.alert { padding: .75rem 1rem; border-radius: 8px; font-size: .875rem; margin-bottom: 1rem; display: flex; align-items: center; gap: .5rem; }
+.alert-success { background: var(--success-lt); color: var(--success); border: 1px solid #bbf7d0; }
+.alert-error { background: var(--danger-lt); color: var(--danger); border: 1px solid #fecaca; }
+.alert-info { background: var(--primary-lt); color: var(--primary); border: 1px solid #bfdbfe; }
+.alert-warn { background: var(--warn-lt); color: var(--warn); border: 1px solid #fde68a; }
+#toast { position: fixed; bottom: 1.5rem; right: 1.5rem; z-index: 200; display: flex; flex-direction: column; gap: .5rem; pointer-events: none; }
+.toast-item { background: #1e293b; color: #fff; padding: .75rem 1.25rem; border-radius: 8px; font-size: .875rem; box-shadow: var(--shadow); animation: slideIn .2s ease; pointer-events: auto; max-width: 320px; }
+@keyframes slideIn { from { transform: translateX(40px); opacity: 0; } to { transform: none; opacity: 1; } }
+
+/* ── Provider cards ── */
+.provider-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 1.25rem; }
+.provider-card { border: 1.5px solid var(--border); border-radius: var(--radius); padding: 1.25rem; background: var(--card); }
+.provider-card.active-provider { border-color: var(--primary); background: var(--primary-lt); }
+.provider-card .p-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: .75rem; }
+.provider-card .p-name { font-weight: 700; font-size: .95rem; }
+.provider-card .p-desc { font-size: .8rem; color: var(--muted); margin-bottom: .75rem; line-height: 1.5; }
+.provider-card .p-actions { display: flex; gap: .5rem; flex-wrap: wrap; }
+
+/* ── Toggle switch ── */
+.toggle-wrap { display: flex; align-items: center; gap: .6rem; }
+.toggle { position: relative; display: inline-block; width: 40px; height: 22px; }
+.toggle input { opacity: 0; width: 0; height: 0; }
+.toggle-slider { position: absolute; cursor: pointer; top: 0; left: 0; right: 0; bottom: 0; background: #cbd5e1; border-radius: 22px; transition: .2s; }
+.toggle-slider:before { position: absolute; content: ""; height: 16px; width: 16px; left: 3px; bottom: 3px; background: #fff; border-radius: 50%; transition: .2s; }
+.toggle input:checked + .toggle-slider { background: var(--primary); }
+.toggle input:checked + .toggle-slider:before { transform: translateX(18px); }
+
+/* ── Code block ── */
+.code { background: #0f172a; color: #e2e8f0; padding: 1rem; border-radius: 8px; font-family: monospace; font-size: .82rem; overflow-x: auto; white-space: pre; }
+
+/* ── Section header ── */
+.section-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 1.5rem; }
+.section-header h2 { font-size: 1.25rem; font-weight: 800; }
+.section-header p { font-size: .85rem; color: var(--muted); margin-top: .25rem; }
+
+/* ── Skeleton ── */
+.skeleton { background: linear-gradient(90deg, #f1f5f9 25%, #e2e8f0 50%, #f1f5f9 75%); background-size: 200% 100%; animation: shimmer 1.5s infinite; border-radius: 6px; }
+@keyframes shimmer { 0% { background-position: -200% 0; } 100% { background-position: 200% 0; } }
+
+/* ── Range slider label ── */
+.range-row { display: flex; align-items: center; gap: .75rem; }
+.range-row input[type=range] { flex: 1; }
+.range-val { min-width: 2.5rem; text-align: right; font-weight: 700; color: var(--primary); font-size: .9rem; }
+
+@media (max-width: 768px) {
+  .sidebar { transform: translateX(-100%); }
+  .main-area { margin-left: 0; }
+  .grid-2, .grid-3 { grid-template-columns: 1fr; }
+}
+</style>
+</head>
+<body>
+
+<!-- Login -->
+<div id="login-overlay">
+  <div class="login-box">
+    <div class="login-logo">
+      <div class="icon">⚙️</div>
+      <h1>工具管理中心</h1>
+      <p>英语试卷词频分析器</p>
+    </div>
+    <div class="fg">
+      <label>用户名</label>
+      <input id="lg-user" type="text" placeholder="admin" autocomplete="username" />
+    </div>
+    <div class="fg">
+      <label>密码</label>
+      <input id="lg-pass" type="password" placeholder="••••••••" autocomplete="current-password" />
+    </div>
+    <div class="err-msg" id="lg-err"></div>
+    <button class="btn btn-primary" style="width:100%;margin-top:.5rem" onclick="doLogin()">登录</button>
+  </div>
+</div>
+
+<!-- App -->
+<div id="app">
+  <!-- Sidebar -->
+  <aside class="sidebar">
+    <div class="sidebar-header">
+      <h2>⚙️ 管理中心</h2>
+      <p>词频分析器 v2.0</p>
+    </div>
+    <nav class="sidebar-nav">
+      <div class="nav-group">概览</div>
+      <button class="nav-item active" onclick="nav('overview')"><span class="icon">📊</span>系统概览</button>
+
+      <div class="nav-group">AI 工具</div>
+      <button class="nav-item" onclick="nav('vocab-providers')"><span class="icon">📚</span>词汇生成器</button>
+      <button class="nav-item" onclick="nav('text-cleaner')"><span class="icon">✨</span>文本清洗</button>
+      <button class="nav-item" onclick="nav('llm-config')"><span class="icon">🤖</span>大模型配置</button>
+
+      <div class="nav-group">OCR</div>
+      <button class="nav-item" onclick="nav('ocr-settings')"><span class="icon">🔍</span>OCR 设置</button>
+      <button class="nav-item" onclick="nav('ocr-cache')"><span class="icon">💾</span>OCR 缓存</button>
+      <button class="nav-item" onclick="nav('ocr-test')"><span class="icon">🧪</span>OCR 测试</button>
+
+      <div class="nav-group">分析</div>
+      <button class="nav-item" onclick="nav('analysis-defaults')"><span class="icon">⚖️</span>分析默认值</button>
+      <button class="nav-item" onclick="nav('storage')"><span class="icon">🗄️</span>存储管理</button>
+
+      <div class="nav-group">用户</div>
+      <button class="nav-item" onclick="nav('users')"><span class="icon">👥</span>用户管理</button>
+      <button class="nav-item" onclick="nav('system')"><span class="icon">🖥️</span>系统信息</button>
+    </nav>
+    <div class="sidebar-footer">
+      <div style="margin-bottom:.5rem">已登录：<strong id="sf-user">—</strong></div>
+      <a href="/" target="_blank">← 返回主页</a> &nbsp;|&nbsp; <a href="#" onclick="logout()">退出</a>
+    </div>
+  </aside>
+
+  <!-- Main -->
+  <div class="main-area">
+    <div class="topbar">
+      <h1 id="topbar-title">📊 系统概览</h1>
+      <div class="actions">
+        <button class="btn btn-ghost btn-sm" onclick="refreshCurrent()">🔄 刷新</button>
+      </div>
+    </div>
+    <div class="content">
+
+      <!-- ── Overview ── -->
+      <div class="section active" id="sec-overview">
+        <div class="section-header">
+          <div><h2>系统概览</h2><p>当前系统运行状态与统计</p></div>
+        </div>
+        <div class="stats-grid" id="ov-stats">
+          <div class="stat-card"><div class="num skeleton" style="height:2rem;width:4rem;margin:0 auto .25rem">　</div><div class="lbl">总用户</div></div>
+          <div class="stat-card"><div class="num skeleton" style="height:2rem;width:4rem;margin:0 auto .25rem">　</div><div class="lbl">试卷</div></div>
+          <div class="stat-card"><div class="num skeleton" style="height:2rem;width:4rem;margin:0 auto .25rem">　</div><div class="lbl">词汇表</div></div>
+          <div class="stat-card"><div class="num skeleton" style="height:2rem;width:4rem;margin:0 auto .25rem">　</div><div class="lbl">OCR缓存</div></div>
+        </div>
+        <div class="grid-2">
+          <div class="card">
+            <div class="card-title"><span class="left">🤖 已启用的服务</span></div>
+            <div id="ov-providers">—</div>
+          </div>
+          <div class="card">
+            <div class="card-title"><span class="left">📋 当前配置</span></div>
+            <div id="ov-config">—</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- ── Vocab Providers ── -->
+      <div class="section" id="sec-vocab-providers">
+        <div class="section-header">
+          <div><h2>📚 词汇生成器</h2><p>配置并测试用于生成词汇释义的服务提供商</p></div>
+        </div>
+        <div class="card" style="margin-bottom:1.5rem">
+          <div class="card-title"><span class="left">当前默认提供商</span></div>
+          <div class="form-row">
+            <div class="form-group">
+              <label>默认词汇提供商</label>
+              <select id="cfg-vocab-provider"></select>
+            </div>
+            <div style="display:flex;align-items:flex-end">
+              <button class="btn btn-primary" onclick="saveVocabProvider()">保存</button>
+            </div>
+          </div>
+        </div>
+        <div class="provider-grid" id="providers-grid">
+          <div class="card">加载中…</div>
+        </div>
+      </div>
+
+      <!-- ── Text Cleaner ── -->
+      <div class="section" id="sec-text-cleaner">
+        <div class="section-header">
+          <div><h2>✨ 文本清洗</h2><p>使用大模型对OCR识别结果进行智能修正</p></div>
+        </div>
+        <div class="card">
+          <div class="card-title"><span class="left">清洗配置</span></div>
+          <div class="form-row" style="margin-bottom:1rem">
+            <div class="form-group" style="flex:0 0 auto">
+              <label>启用文本清洗</label>
+              <div class="toggle-wrap" style="margin-top:.5rem">
+                <label class="toggle"><input type="checkbox" id="cleaner-enabled" onchange="updateCleanerEnabled()"><span class="toggle-slider"></span></label>
+                <span id="cleaner-enabled-lbl">已禁用</span>
+              </div>
+            </div>
+            <div class="form-group">
+              <label>清洗模型后端</label>
+              <select id="cleaner-backend">
+                <option value="none">不使用（直接传递）</option>
+                <option value="claude">Claude（Anthropic）</option>
+                <option value="deepseek">DeepSeek</option>
+                <option value="openai">OpenAI 兼容接口</option>
+              </select>
+            </div>
+          </div>
+          <div class="form-group" style="margin-bottom:1rem">
+            <label>场景提示词（Context Hint）</label>
+            <input type="text" id="cleaner-hint" value="Chinese high school English exam, multiple choice" />
+            <span class="hint">帮助 AI 更好地理解文档类型（可选）</span>
+          </div>
+          <div style="display:flex;gap:.75rem">
+            <button class="btn btn-primary" onclick="saveCleanerConfig()">保存配置</button>
+          </div>
+        </div>
+        <div class="card">
+          <div class="card-title"><span class="left">工作原理</span></div>
+          <div style="font-size:.875rem;color:var(--muted);line-height:1.8">
+            <p>文本清洗会在 OCR 识别完成后、结构分析开始前，对原始文本进行一次 AI 润色：</p>
+            <ul style="margin:.75rem 0 .75rem 1.5rem">
+              <li>修正 OCR 常见误识：0/O 混淆、l/1/I 混淆、rn/m 错误</li>
+              <li>还原正确的换行结构（题干/选项分离）</li>
+              <li>去除扫描噪点引起的乱码符号</li>
+              <li>不修改词汇内容，只做格式与字符纠正</li>
+            </ul>
+            <p><strong>注意：</strong>仅在扫描件/图片文件触发 OCR 时才会调用清洗，纯文本文件不受影响。</p>
+          </div>
+        </div>
+      </div>
+
+      <!-- ── LLM Config ── -->
+      <div class="section" id="sec-llm-config">
+        <div class="section-header">
+          <div><h2>🤖 大模型配置</h2><p>配置各大模型的 API 密钥与参数（密钥存储在 .env 文件）</p></div>
+        </div>
+
+        <div class="card">
+          <div class="card-title"><span class="left">🔑 API 密钥状态</span></div>
+          <div id="api-key-status">加载中…</div>
+        </div>
+
+        <div class="card">
+          <div class="card-title"><span class="left">Claude（Anthropic）</span><span class="badge badge-blue">已集成</span></div>
+          <div class="form-row">
+            <div class="form-group">
+              <label>模型</label>
+              <label>API Key</label>
+              <input type="password" id="cfg-anthropic-key" placeholder="sk-ant-..." />
+            </div>
+            <div class="form-group">
+              <label>API Key</label>
+              <label>妯″瀷</label><select id="cfg-ai-model">
+                <option value="claude-opus-4-7">claude-opus-4-7（最强）</option>
+                <option value="claude-opus-4-6">claude-opus-4-6</option>
+                <option value="claude-sonnet-4-6">claude-sonnet-4-6（推荐）</option>
+                <option value="claude-haiku-4-5-20251001">claude-haiku-4-5（快速）</option>
+              </select>
+            </div>
+            <div class="form-group">
+              <label>每批词汇数量</label>
+              <div class="range-row">
+                <input type="range" id="cfg-batch-size" min="5" max="50" step="5" oninput="this.nextElementSibling.textContent=this.value" />
+                <span class="range-val">20</span>
+              </div>
+            </div>
+          </div>
+          <button class="btn btn-primary btn-sm" onclick="saveModelConfig()" style="margin-top:.75rem">保存</button>
+        </div>
+
+        <div class="card">
+          <div class="card-title"><span class="left">DeepSeek</span></div>
+          <div class="alert alert-info" style="margin-bottom:1rem">
+            🔑 在 .env 文件中设置 <code>DEEPSEEK_API_KEY</code> 启用此功能
+          </div>
+          <div class="form-row">
+            <div class="form-group">
+              <label>模型</label>
+              <input type="password" id="cfg-deepseek-key" placeholder="sk-..." />
+            </div>
+            <div class="form-group">
+              <label>Model</label>
+              <select id="cfg-deepseek-model">
+                <option value="deepseek-chat">deepseek-chat（推荐）</option>
+                <option value="deepseek-reasoner">deepseek-reasoner</option>
+              </select>
+            </div>
+            <div class="form-group">
+              <label>API 地址</label>
+              <input type="text" id="cfg-deepseek-url" value="https://api.deepseek.com/v1" />
+            </div>
+          </div>
+          <button class="btn btn-primary btn-sm" onclick="saveDeepSeekConfig()" style="margin-top:.75rem">保存</button>
+        </div>
+
+        <div class="card">
+          <div class="card-title"><span class="left">OpenAI 兼容接口</span><span class="badge badge-gray">支持 Ollama / LM Studio</span></div>
+          <div class="alert alert-info" style="margin-bottom:1rem">
+            🔑 在 .env 文件中设置 <code>OPENAI_API_KEY</code>，<code>OPENAI_BASE_URL</code>（可选）
+          </div>
+          <div class="form-row">
+            <div class="form-group">
+              <label>模型名</label>
+              <input type="password" id="cfg-openai-key" placeholder="sk-... / ollama" />
+            </div>
+            <div class="form-group">
+              <label>Model</label>
+              <input type="text" id="cfg-openai-model" placeholder="gpt-4o-mini / llama3 / qwen2.5" />
+            </div>
+            <div class="form-group">
+              <label>API 地址（留空使用 OpenAI 默认）</label>
+              <input type="text" id="cfg-openai-url" placeholder="http://localhost:11434/v1（Ollama）" />
+            </div>
+          </div>
+          <button class="btn btn-primary btn-sm" onclick="saveOpenAIConfig()" style="margin-top:.75rem">保存</button>
+        </div>
+      </div>
+
+      <!-- ── OCR Settings ── -->
+      <div class="section" id="sec-ocr-settings">
+        <div class="section-header">
+          <div><h2>🔍 OCR 设置</h2><p>配置文字识别引擎与参数</p></div>
+        </div>
+        <div class="card">
+          <div class="card-title"><span class="left">解析后端</span></div>
+          <div class="form-row" style="margin-bottom:1rem">
+            <div class="form-group">
+              <label>后端选择</label>
+              <select id="ocr-backend">
+                <option value="local">本地（Tesseract / RapidOCR）</option>
+                <option value="mineru">MinerU（高精度布局分析）</option>
+              </select>
+            </div>
+            <div class="form-group">
+              <label>OCR 引擎</label>
+              <select id="ocr-engine">
+                <option value="auto">自动（优先 RapidOCR）</option>
+                <option value="rapidocr">RapidOCR</option>
+                <option value="tesseract">Tesseract</option>
+              </select>
+            </div>
+            <div class="form-group">
+              <label>识别语言</label>
+              <input type="text" id="ocr-lang" placeholder="eng" />
+            </div>
+          </div>
+          <div class="form-row" style="margin-bottom:1rem">
+            <div class="form-group">
+              <label>PDF DPI</label>
+              <div class="range-row">
+                <input type="range" id="ocr-dpi" min="150" max="600" step="50" oninput="this.nextElementSibling.textContent=this.value" />
+                <span class="range-val">300</span>
+              </div>
+            </div>
+            <div class="form-group">
+              <label>放大倍数</label>
+              <div class="range-row">
+                <input type="range" id="ocr-upscale" min="1" max="4" step="0.5" oninput="this.nextElementSibling.textContent=this.value" />
+                <span class="range-val">2</span>
+              </div>
+            </div>
+            <div class="form-group">
+              <label>二值化阈值</label>
+              <div class="range-row">
+                <input type="range" id="ocr-threshold" min="100" max="255" step="5" oninput="this.nextElementSibling.textContent=this.value" />
+                <span class="range-val">180</span>
+              </div>
+            </div>
+          </div>
+          <div class="form-row" style="gap:2rem">
+            <label class="toggle-wrap"><label class="toggle"><input type="checkbox" id="ocr-preprocess"><span class="toggle-slider"></span></label>预处理图像</label>
+            <label class="toggle-wrap"><label class="toggle"><input type="checkbox" id="ocr-sharpen"><span class="toggle-slider"></span></label>锐化</label>
+            <label class="toggle-wrap"><label class="toggle"><input type="checkbox" id="ocr-autorotate"><span class="toggle-slider"></span></label>自动旋转</label>
+          </div>
+          <button class="btn btn-primary" onclick="saveOCRConfig()" style="margin-top:1rem">保存 OCR 设置</button>
+        </div>
+
+        <div class="card" id="mineru-card" style="display:none">
+          <div class="card-title"><span class="left">MinerU 配置</span></div>
+          <div class="form-row">
+            <div class="form-group">
+              <label>API 地址</label>
+              <input type="text" id="mineru-url" />
+            </div>
+            <div class="form-group">
+              <label>识别语言</label>
+              <input type="text" id="mineru-lang" placeholder="en" />
+            </div>
+          </div>
+          <div class="form-row" style="gap:2rem;margin-top:.75rem">
+            <label class="toggle-wrap"><label class="toggle"><input type="checkbox" id="mineru-ocr"><span class="toggle-slider"></span></label>强制 OCR 模式</label>
+            <label class="toggle-wrap"><label class="toggle"><input type="checkbox" id="mineru-table"><span class="toggle-slider"></span></label>识别表格</label>
+            <label class="toggle-wrap"><label class="toggle"><input type="checkbox" id="mineru-formula"><span class="toggle-slider"></span></label>识别公式</label>
+            <label class="toggle-wrap"><label class="toggle"><input type="checkbox" id="mineru-fallback"><span class="toggle-slider"></span></label>失败时回退本地</label>
+          </div>
+          <button class="btn btn-primary" onclick="saveMinerUConfig()" style="margin-top:1rem">保存 MinerU 设置</button>
+        </div>
+      </div>
+
+      <!-- ── OCR Cache ── -->
+      <div class="section" id="sec-ocr-cache">
+        <div class="section-header">
+          <div><h2>💾 OCR 缓存</h2><p>缓存识别结果，参数调整后无需重新 OCR</p></div>
+        </div>
+        <div class="stats-grid" style="grid-template-columns:repeat(3,1fr)">
+          <div class="stat-card"><div class="num" id="cache-count">—</div><div class="lbl">缓存条目</div></div>
+          <div class="stat-card"><div class="num" id="cache-size">—</div><div class="lbl">占用空间</div></div>
+          <div class="stat-card"><div class="num" id="cache-dir" style="font-size:.85rem;word-break:break-all">—</div><div class="lbl">缓存目录</div></div>
+        </div>
+        <div class="card">
+          <div class="card-title"><span class="left">缓存管理</span></div>
+          <div class="form-row" style="align-items:center;margin-bottom:1.25rem">
+            <div class="form-group" style="flex:0 0 auto">
+              <label>启用 OCR 缓存</label>
+              <div class="toggle-wrap" style="margin-top:.5rem">
+                <label class="toggle"><input type="checkbox" id="cache-enabled" onchange="saveCacheEnabled()"><span class="toggle-slider"></span></label>
+                <span id="cache-enabled-lbl">已禁用</span>
+              </div>
+            </div>
+          </div>
+          <div style="display:flex;gap:.75rem;flex-wrap:wrap">
+            <button class="btn btn-ghost" onclick="loadCacheStats()">🔄 刷新统计</button>
+            <button class="btn btn-danger" onclick="clearCache()">🗑️ 清空缓存</button>
+          </div>
+        </div>
+        <div class="card">
+          <div class="card-title"><span class="left">工作原理</span></div>
+          <div style="font-size:.875rem;color:var(--muted);line-height:1.8">
+            <p>每个文件的 OCR 结果以 <code>SHA-256(文件内容) + OCR设置</code> 为键存储到磁盘。</p>
+            <ul style="margin:.75rem 0 .75rem 1.5rem">
+              <li>上传同一文件再次分析时，直接复用缓存，跳过 OCR 步骤</li>
+              <li>调整词汇过滤参数、权重、Top-N 等不影响缓存命中</li>
+              <li>更换 OCR 引擎或语言会产生新缓存条目</li>
+              <li>缓存文件为 JSON 格式，存储在 <code>data/ocr_cache/</code></li>
+            </ul>
+          </div>
+        </div>
+      </div>
+
+      <!-- ── OCR Test ── -->
+      <div class="section" id="sec-ocr-test">
+        <div class="section-header">
+          <div><h2>🧪 OCR 测试</h2><p>上传文件测试当前 OCR 配置的识别效果</p></div>
+        </div>
+        <div class="card">
+          <div class="card-title"><span class="left">上传测试文件</span></div>
+          <div id="ocr-drop" style="border:2px dashed var(--border);border-radius:10px;padding:2rem;text-align:center;cursor:pointer;transition:border-color .2s;margin-bottom:1rem" onclick="document.getElementById('ocr-file').click()">
+            <div style="font-size:2rem;margin-bottom:.5rem">📄</div>
+            <p style="color:var(--muted);font-size:.875rem">点击或拖拽文件到此处（PDF / 图片）</p>
+            <input id="ocr-file" type="file" accept=".pdf,.png,.jpg,.jpeg,.bmp,.tiff" style="display:none" onchange="runOCRTest(this.files[0])" />
+          </div>
+          <div id="ocr-result" style="display:none">
+            <div class="form-row" style="margin-bottom:.75rem">
+              <div class="form-group"><label>文件名</label><input readonly id="ocr-res-file" /></div>
+              <div class="form-group"><label>是否OCR</label><input readonly id="ocr-res-ocr" /></div>
+              <div class="form-group"><label>后端</label><input readonly id="ocr-res-backend" /></div>
+              <div class="form-group"><label>字符数</label><input readonly id="ocr-res-len" /></div>
+            </div>
+            <label style="font-size:.8rem;font-weight:600;color:var(--muted)">识别结果预览</label>
+            <div id="ocr-text-out" class="code" style="margin-top:.5rem;max-height:400px;overflow-y:auto"></div>
+          </div>
+        </div>
+      </div>
+
+      <!-- ── Analysis Defaults ── -->
+      <div class="section" id="sec-analysis-defaults">
+        <div class="section-header">
+          <div><h2>⚖️ 分析默认值</h2><p>设置词频分析的全局默认参数</p></div>
+        </div>
+        <div class="card">
+          <div class="card-title"><span class="left">过滤选项</span></div>
+          <div class="form-row" style="margin-bottom:1rem">
+            <div class="form-group">
+              <label>最短词长</label>
+              <div class="range-row">
+                <input type="range" id="ana-min-len" min="1" max="10" step="1" oninput="this.nextElementSibling.textContent=this.value" />
+                <span class="range-val">2</span>
+              </div>
+            </div>
+            <div class="form-group">
+              <label>默认 Top-N</label>
+              <div class="range-row">
+                <input type="range" id="ana-top-n" min="10" max="200" step="10" oninput="this.nextElementSibling.textContent=this.value" />
+                <span class="range-val">50</span>
+              </div>
+            </div>
+          </div>
+          <div class="form-row" style="gap:2rem;margin-bottom:1rem">
+            <label class="toggle-wrap"><label class="toggle"><input type="checkbox" id="ana-stopwords"><span class="toggle-slider"></span></label>过滤停用词</label>
+            <label class="toggle-wrap"><label class="toggle"><input type="checkbox" id="ana-proper"><span class="toggle-slider"></span></label>保留专有名词</label>
+            <label class="toggle-wrap"><label class="toggle"><input type="checkbox" id="ana-numbers"><span class="toggle-slider"></span></label>过滤数字</label>
+            <label class="toggle-wrap"><label class="toggle"><input type="checkbox" id="ana-basic"><span class="toggle-slider"></span></label>过滤基础词汇</label>
+          </div>
+        </div>
+        <div class="card">
+          <div class="card-title"><span class="left">计分权重</span></div>
+          <div class="form-row">
+            <div class="form-group">
+              <label>正文权重（Body）</label>
+              <div class="range-row">
+                <input type="range" id="ana-w-body" min="0" max="10" step="0.5" oninput="this.nextElementSibling.textContent=this.value" />
+                <span class="range-val">1.0</span>
+              </div>
+            </div>
+            <div class="form-group">
+              <label>题干权重（Stem）</label>
+              <div class="range-row">
+                <input type="range" id="ana-w-stem" min="0" max="10" step="0.5" oninput="this.nextElementSibling.textContent=this.value" />
+                <span class="range-val">1.5</span>
+              </div>
+            </div>
+            <div class="form-group">
+              <label>选项权重（Option）</label>
+              <div class="range-row">
+                <input type="range" id="ana-w-option" min="0" max="10" step="0.5" oninput="this.nextElementSibling.textContent=this.value" />
+                <span class="range-val">3.0</span>
+              </div>
+            </div>
+          </div>
+          <button class="btn btn-primary" onclick="saveAnalysisDefaults()" style="margin-top:1rem">保存分析设置</button>
+        </div>
+      </div>
+
+      <!-- ── Storage ── -->
+      <div class="section" id="sec-storage">
+        <div class="section-header">
+          <div><h2>🗄️ 存储管理</h2><p>查看文件存储目录与数据库信息</p></div>
+        </div>
+        <div class="card">
+          <div class="card-title"><span class="left">存储路径</span></div>
+          <table class="tbl">
+            <thead><tr><th>类型</th><th>路径</th><th>说明</th></tr></thead>
+            <tbody id="storage-tbl">
+              <tr><td colspan="3" style="text-align:center;color:var(--muted)">加载中…</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="card">
+          <div class="card-title"><span class="left">目录结构</span></div>
+          <div class="code">data/
+├── uploads/       ← 临时上传文件
+├── files/         ← 持久化文件存档
+├── exports/       ← CSV / XLSX 导出文件
+└── ocr_cache/     ← OCR 识别结果缓存（JSON）</div>
+        </div>
+      </div>
+
+      <!-- ── Users ── -->
+      <div class="section" id="sec-users">
+        <div class="section-header">
+          <div><h2>👥 用户管理</h2></div>
+          <button class="btn btn-primary" onclick="showCreateUser()">+ 新建用户</button>
+        </div>
+        <div class="card" id="create-user-form" style="display:none;margin-bottom:1.5rem">
+          <div class="card-title"><span class="left">新建用户</span></div>
+          <div class="form-row">
+            <div class="form-group"><label>用户名</label><input id="nu-user" placeholder="username" /></div>
+            <div class="form-group"><label>密码</label><input id="nu-pass" type="password" placeholder="password" /></div>
+            <div class="form-group" style="flex:0 0 auto;justify-content:flex-end">
+              <label>&nbsp;</label>
+              <label class="toggle-wrap" style="margin-top:.1rem"><label class="toggle"><input type="checkbox" id="nu-admin"><span class="toggle-slider"></span></label>管理员</label>
+            </div>
+          </div>
+          <div style="display:flex;gap:.75rem;margin-top:.75rem">
+            <button class="btn btn-success" onclick="createUser()">创建</button>
+            <button class="btn btn-ghost" onclick="document.getElementById('create-user-form').style.display='none'">取消</button>
+          </div>
+        </div>
+        <div class="card">
+          <table class="tbl">
+            <thead><tr><th>ID</th><th>用户名</th><th>角色</th><th>试卷</th><th>词汇表</th><th>注册时间</th><th>操作</th></tr></thead>
+            <tbody id="users-tbl"><tr><td colspan="7" style="text-align:center;color:var(--muted)">加载中…</td></tr></tbody>
+          </table>
+        </div>
+      </div>
+
+      <!-- ── System ── -->
+      <div class="section" id="sec-system">
+        <div class="section-header">
+          <div><h2>🖥️ 系统信息</h2><p>运行环境与依赖包版本</p></div>
+        </div>
+        <div id="sys-content">加载中…</div>
+      </div>
+
+    </div><!-- /content -->
+  </div><!-- /main-area -->
+</div><!-- /app -->
+
+<div id="toast"></div>
+
+<script>
+// ── Auth ──────────────────────────────────────────────────────────────────────
+let _token = localStorage.getItem('manage_token') || '';
+let _username = localStorage.getItem('manage_user') || '';
+let _currentSection = 'overview';
+
+async function api(method, path, body) {
+  const opts = { method, headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + _token } };
+  if (body !== undefined) opts.body = JSON.stringify(body);
+  const r = await fetch(path, opts);
+  if (r.status === 401) { logout(); return null; }
+  return r.json();
+}
+
+async function apiForm(path, formData) {
+  const r = await fetch(path, { method: 'POST', headers: { 'Authorization': 'Bearer ' + _token }, body: formData });
+  if (r.status === 401) { logout(); return null; }
+  return r.json();
+}
+
+async function doLogin() {
+  const user = document.getElementById('lg-user').value.trim();
+  const pass = document.getElementById('lg-pass').value;
+  const err = document.getElementById('lg-err');
+  err.textContent = '';
+  if (!user || !pass) { err.textContent = '请输入用户名和密码'; return; }
+  try {
+    const r = await fetch('/auth/login', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({username:user, password:pass}) });
+    const d = await r.json();
+    if (!r.ok) { err.textContent = d.detail || '登录失败'; return; }
+    if (!d.is_admin) { err.textContent = '需要管理员账户'; return; }
+    const token = d.token || d.access_token;
+    if (!token) { err.textContent = '登录成功，但未收到有效 token'; return; }
+    _token = token; _username = d.username || user;
+    localStorage.setItem('manage_token', _token);
+    localStorage.setItem('manage_user', _username);
+    startApp();
+  } catch(e) { err.textContent = '网络错误: ' + e.message; }
+}
+
+document.addEventListener('keydown', e => {
+  if (e.key === 'Enter' && document.getElementById('login-overlay').style.display !== 'none') doLogin();
+});
+
+function logout() {
+  _token = ''; _username = '';
+  localStorage.removeItem('manage_token');
+  localStorage.removeItem('manage_user');
+  document.getElementById('app').style.display = 'none';
+  document.getElementById('login-overlay').style.display = 'flex';
+}
+
+// ── Init ──────────────────────────────────────────────────────────────────────
+async function startApp() {
+  if (!_token) return;
+  // Verify token
+  const me = await api('GET', '/auth/me');
+  if (!me || !me.is_admin) { logout(); return; }
+  document.getElementById('login-overlay').style.display = 'none';
+  document.getElementById('app').style.display = 'flex';
+  document.getElementById('sf-user').textContent = _username;
+  nav('overview');
+}
+
+window.addEventListener('load', () => { if (_token) startApp(); });
+
+// ── Navigation ────────────────────────────────────────────────────────────────
+const SECTION_TITLES = {
+  overview: '📊 系统概览', 'vocab-providers': '📚 词汇生成器',
+  'text-cleaner': '✨ 文本清洗', 'llm-config': '🤖 大模型配置',
+  'ocr-settings': '🔍 OCR 设置', 'ocr-cache': '💾 OCR 缓存',
+  'ocr-test': '🧪 OCR 测试', 'analysis-defaults': '⚖️ 分析默认值',
+  storage: '🗄️ 存储管理', users: '👥 用户管理', system: '🖥️ 系统信息',
+};
+
+function nav(id) {
+  document.querySelectorAll('.section').forEach(s => s.classList.remove('active'));
+  document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active'));
+  const sec = document.getElementById('sec-' + id);
+  if (sec) sec.classList.add('active');
+  document.querySelectorAll('.nav-item').forEach(n => {
+    if (n.getAttribute('onclick') === `nav('${id}')`) n.classList.add('active');
+  });
+  document.getElementById('topbar-title').textContent = SECTION_TITLES[id] || id;
+  _currentSection = id;
+  loadSection(id);
+}
+
+function refreshCurrent() { loadSection(_currentSection); }
+
+function loadSection(id) {
+  if (id === 'overview') loadOverview();
+  else if (id === 'vocab-providers') loadProviders();
+  else if (id === 'text-cleaner') loadCleanerConfig();
+  else if (id === 'llm-config') loadLLMConfig();
+  else if (id === 'ocr-settings') loadOCRSettings();
+  else if (id === 'ocr-cache') loadCacheStats();
+  else if (id === 'analysis-defaults') loadAnalysisDefaults();
+  else if (id === 'storage') loadStorage();
+  else if (id === 'users') loadUsers();
+  else if (id === 'system') loadSystem();
+}
+
+// ── Toast ─────────────────────────────────────────────────────────────────────
+function toast(msg, type = 'info') {
+  const c = {success:'✅',error:'❌',info:'ℹ️',warn:'⚠️'}[type] || '';
+  const el = document.createElement('div');
+  el.className = 'toast-item';
+  el.textContent = c + ' ' + msg;
+  document.getElementById('toast').appendChild(el);
+  setTimeout(() => el.remove(), 3500);
+}
+
+// ── Overview ──────────────────────────────────────────────────────────────────
+async function loadOverview() {
+  const [ov, cache] = await Promise.all([
+    api('GET', '/admin/overview'),
+    api('GET', '/admin/ocr-cache'),
+  ]);
+  if (!ov) return;
+
+  document.getElementById('ov-stats').innerHTML = `
+    <div class="stat-card"><div class="num">${ov.users}</div><div class="lbl">总用户</div></div>
+    <div class="stat-card"><div class="num">${ov.exams}</div><div class="lbl">试卷</div></div>
+    <div class="stat-card"><div class="num">${ov.dicts}</div><div class="lbl">词汇表</div></div>
+    <div class="stat-card"><div class="num">${cache ? cache.count : '—'}</div><div class="lbl">OCR缓存条目</div></div>
+  `;
+
+  const providers = ov.providers || [];
+  const providerHtml = providers.map(p => `<span class="badge badge-blue" style="margin:.2rem">${p}</span>`).join('');
+  document.getElementById('ov-providers').innerHTML = providerHtml || '<span class="badge badge-gray">无可用提供商</span>';
+
+  const cfg = ov.runtime_config || {};
+  document.getElementById('ov-config').innerHTML = `
+    <table class="tbl" style="font-size:.82rem">
+      <tr><td style="color:var(--muted)">词汇提供商</td><td><strong>${cfg.vocab_provider || '—'}</strong></td></tr>
+      <tr><td style="color:var(--muted)">AI 模型</td><td>${cfg.ai_model || '—'}</td></tr>
+      <tr><td style="color:var(--muted)">解析后端</td><td>${cfg.parse_backend || 'local'}</td></tr>
+      <tr><td style="color:var(--muted)">文本清洗</td><td>${cfg.text_cleaner?.enabled ? '✅ ' + cfg.text_cleaner.backend : '❌ 关闭'}</td></tr>
+      <tr><td style="color:var(--muted)">OCR缓存</td><td>${cfg.ocr_cache_enabled ? '✅ 启用' : '❌ 关闭'}</td></tr>
+    </table>
+  `;
+}
+
+// ── Vocab Providers ───────────────────────────────────────────────────────────
+const PROVIDER_META = {
+  claude:   { icon:'🟣', name:'Claude', desc:'Anthropic Claude — 最高质量，需要 API Key', req:'ANTHROPIC_API_KEY' },
+  deepseek: { icon:'🔵', name:'DeepSeek', desc:'深度求索大模型 — 中文能力强，性价比高', req:'DEEPSEEK_API_KEY' },
+  openai:   { icon:'🟢', name:'OpenAI 兼容', desc:'支持 GPT-4o、Ollama、本地模型等', req:'OPENAI_API_KEY' },
+  free_dict:{ icon:'📖', name:'Free Dictionary', desc:'免费英文词典 API，无需密钥', req:null },
+  merriam_webster:{ icon:'📗', name:'Merriam-Webster', desc:'权威英文词典，需要 API Key', req:'MERRIAM_WEBSTER_KEY' },
+  youdao:   { icon:'📕', name:'有道词典', desc:'有道智云 API — 中英词典，需要 App Key', req:'YOUDAO_APP_KEY' },
+  ecdict:   { icon:'💿', name:'ECDICT 离线词典', desc:'开源离线中英词典（3M+词条），需下载数据库', req:'ECDICT_PATH' },
+};
+
+let _runtimeConfig = null;
+let _sysInfo = null;
+
+async function loadProviders() {
+  const [providers, cfg, sys] = await Promise.all([
+    api('GET', '/api/providers'),
+    api('GET', '/admin/config'),
+    api('GET', '/admin/system'),
+  ]);
+  if (!cfg) return;
+  _runtimeConfig = cfg;
+  _sysInfo = sys;
+
+  const currentProvider = cfg.vocab_provider || 'claude';
+  const sel = document.getElementById('cfg-vocab-provider');
+  sel.innerHTML = (providers || []).map(p => `<option value="${p}"${p===currentProvider?' selected':''}>${PROVIDER_META[p]?.name || p}</option>`).join('');
+
+  const allProviders = Object.keys(PROVIDER_META);
+  const available = new Set(providers || []);
+
+  const html = allProviders.map(pid => {
+    const meta = PROVIDER_META[pid] || { icon:'📦', name:pid, desc:'', req:null };
+    const isAvail = available.has(pid);
+    const isActive = pid === currentProvider;
+    const hasKey = !meta.req || (sys && sys['has_' + meta.req.toLowerCase().replace('_key','_key').replace('_path','').replace('_app_key','').replace('_api_key','_key')]);
+
+    return `
+      <div class="provider-card ${isActive ? 'active-provider' : ''}">
+        <div class="p-header">
+          <span class="p-name">${meta.icon} ${meta.name}</span>
+          ${isAvail ? '<span class="badge badge-green">可用</span>' : '<span class="badge badge-gray">不可用</span>'}
+        </div>
+        <div class="p-desc">${meta.desc}</div>
+        ${meta.req ? `<div style="font-size:.75rem;color:var(--muted);margin-bottom:.75rem">需要: <code>${meta.req}</code></div>` : ''}
+        <div class="p-actions">
+          ${isAvail ? `<button class="btn btn-sm btn-ghost" onclick="testProvider('${pid}')">🧪 测试</button>` : ''}
+          ${isAvail && !isActive ? `<button class="btn btn-sm btn-primary" onclick="setProvider('${pid}')">✓ 设为默认</button>` : ''}
+          ${isActive ? '<span class="badge badge-blue">当前默认</span>' : ''}
+        </div>
+      </div>
+    `;
+  }).join('');
+
+  document.getElementById('providers-grid').innerHTML = html;
+}
+
+async function saveVocabProvider() {
+  const v = document.getElementById('cfg-vocab-provider').value;
+  await setProvider(v);
+}
+
+async function setProvider(name) {
+  const r = await api('PUT', '/admin/config', { vocab_provider: name });
+  if (r) { toast('已设置默认提供商: ' + name, 'success'); loadProviders(); }
+}
+
+async function testProvider(name) {
+  toast('正在测试 ' + name + '...', 'info');
+  const r = await api('POST', '/admin/providers/test', { provider: name, word: 'eloquent' });
+  if (!r) return;
+  if (r.ok) {
+    const res = r.result;
+    toast(`✅ ${name} 测试成功: ${res?.chinese_meaning || res?.english_definition || 'OK'}`, 'success');
+  } else {
+    toast(`❌ ${name} 测试失败: ${r.error}`, 'error');
+  }
+}
+
+// ── Text Cleaner ──────────────────────────────────────────────────────────────
+async function loadCleanerConfig() {
+  const cfg = await api('GET', '/admin/config');
+  if (!cfg) return;
+  const cleaner = cfg.text_cleaner || {};
+  document.getElementById('cleaner-enabled').checked = cleaner.enabled || false;
+  document.getElementById('cleaner-enabled-lbl').textContent = cleaner.enabled ? '已启用' : '已禁用';
+  document.getElementById('cleaner-backend').value = cleaner.backend || 'none';
+  document.getElementById('cleaner-hint').value = cleaner.context_hint || '';
+}
+
+function updateCleanerEnabled() {
+  const en = document.getElementById('cleaner-enabled').checked;
+  document.getElementById('cleaner-enabled-lbl').textContent = en ? '已启用' : '已禁用';
+}
+
+async function saveCleanerConfig() {
+  const payload = {
+    text_cleaner: {
+      enabled: document.getElementById('cleaner-enabled').checked,
+      backend: document.getElementById('cleaner-backend').value,
+      context_hint: document.getElementById('cleaner-hint').value,
+    }
+  };
+  const r = await api('PUT', '/admin/config', payload);
+  if (r) toast('文本清洗配置已保存', 'success');
+}
+
+// ── LLM Config ────────────────────────────────────────────────────────────────
+async function loadLLMConfig() {
+  const [cfg, sys] = await Promise.all([api('GET', '/admin/config'), api('GET', '/admin/system')]);
+  if (!cfg) return;
+
+  // Key status
+  const keys = [
+    { label: 'Anthropic (Claude)', ok: sys?.has_anthropic_key },
+    { label: 'DeepSeek', ok: sys?.has_deepseek_key },
+    { label: 'OpenAI', ok: sys?.has_openai_key },
+    { label: 'Merriam-Webster', ok: sys?.has_mw_key },
+    { label: '有道词典', ok: sys?.has_youdao_key },
+    { label: 'ECDICT 路径', ok: sys?.has_ecdict },
+  ];
+  document.getElementById('api-key-status').innerHTML = `
+    <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:.75rem">
+      ${keys.map(k => `
+        <div style="display:flex;align-items:center;gap:.5rem;font-size:.875rem">
+          <span class="dot ${k.ok ? 'dot-green' : 'dot-red'}"></span>
+          <span>${k.label}</span>
+          <span class="badge ${k.ok ? 'badge-green' : 'badge-gray'}">${k.ok ? '已配置' : '未配置'}</span>
+        </div>`).join('')}
+    </div>
+  `;
+
+  const model = document.getElementById('cfg-ai-model');
+  model.value = cfg.ai_model || 'claude-opus-4-6';
+  const bs = document.getElementById('cfg-batch-size');
+  bs.value = cfg.ai_batch_size || 20;
+  bs.nextElementSibling.textContent = bs.value;
+
+  normalizeLLMConfigLabels();
+  const llm = cfg.llm || {};
+  document.getElementById('cfg-anthropic-key').value = llm.anthropic_api_key || '';
+  document.getElementById('cfg-deepseek-key').value = llm.deepseek_api_key || '';
+  document.getElementById('cfg-deepseek-model').value = llm.deepseek_model || 'deepseek-chat';
+  document.getElementById('cfg-deepseek-url').value = llm.deepseek_base_url || 'https://api.deepseek.com/v1';
+  document.getElementById('cfg-openai-key').value = llm.openai_api_key || '';
+  document.getElementById('cfg-openai-model').value = llm.openai_model || 'gpt-4o-mini';
+  document.getElementById('cfg-openai-url').value = llm.openai_base_url || '';
+}
+
+function normalizeLLMConfigLabels() {
+  const setGroupLabel = (id, text) => {
+    const input = document.getElementById(id);
+    const group = input?.closest('.form-group');
+    if (!group) return;
+    const labels = group.querySelectorAll('label');
+    if (labels[0]) labels[0].textContent = text;
+    for (let i = 1; i < labels.length; i += 1) labels[i].remove();
+  };
+  setGroupLabel('cfg-anthropic-key', 'API Key');
+  setGroupLabel('cfg-ai-model', 'Model');
+  setGroupLabel('cfg-deepseek-key', 'API Key');
+  setGroupLabel('cfg-deepseek-model', 'Model');
+  setGroupLabel('cfg-openai-key', 'API Key');
+  setGroupLabel('cfg-openai-model', 'Model');
+}
+
+async function saveModelConfig() {
+  const r = await api('PUT', '/admin/config', {
+    ai_model: document.getElementById('cfg-ai-model').value,
+    ai_batch_size: parseInt(document.getElementById('cfg-batch-size').value),
+    llm: {
+      anthropic_api_key: document.getElementById('cfg-anthropic-key').value.trim(),
+    },
+  });
+  if (r) toast('Claude 配置已保存', 'success');
+}
+
+async function saveDeepSeekConfig() {
+  const r = await api('PUT', '/admin/config', {
+    llm: {
+      deepseek_api_key: document.getElementById('cfg-deepseek-key').value.trim(),
+      deepseek_model: document.getElementById('cfg-deepseek-model').value,
+      deepseek_base_url: document.getElementById('cfg-deepseek-url').value.trim(),
+    }
+  });
+  if (r) toast('DeepSeek 配置已保存', 'success');
+}
+
+async function saveOpenAIConfig() {
+  const r = await api('PUT', '/admin/config', {
+    llm: {
+      openai_api_key: document.getElementById('cfg-openai-key').value.trim(),
+      openai_model: document.getElementById('cfg-openai-model').value,
+      openai_base_url: document.getElementById('cfg-openai-url').value.trim(),
+    }
+  });
+  if (r) toast('OpenAI 配置已保存', 'success');
+}
+
+// ── OCR Settings ──────────────────────────────────────────────────────────────
+async function loadOCRSettings() {
+  const cfg = await api('GET', '/admin/config');
+  if (!cfg) return;
+  const ocr = cfg.ocr || {};
+  setVal('ocr-backend', cfg.parse_backend || 'local');
+  setVal('ocr-engine', ocr.engine || 'auto');
+  setVal('ocr-lang', ocr.language || 'eng');
+  setRange('ocr-dpi', ocr.pdf_dpi || 300);
+  setRange('ocr-upscale', ocr.upscale_factor || 2.0);
+  setRange('ocr-threshold', ocr.binary_threshold || 180);
+  document.getElementById('ocr-preprocess').checked = ocr.preprocess !== false;
+  document.getElementById('ocr-sharpen').checked = ocr.sharpen !== false;
+  document.getElementById('ocr-autorotate').checked = ocr.auto_rotate || false;
+
+  const mu = cfg.mineru || {};
+  document.getElementById('mineru-card').style.display = cfg.parse_backend === 'mineru' ? 'block' : 'none';
+  setVal('mineru-url', mu.api_base || '');
+  setVal('mineru-lang', mu.language || 'en');
+  document.getElementById('mineru-ocr').checked = mu.is_ocr || false;
+  document.getElementById('mineru-table').checked = mu.enable_table !== false;
+  document.getElementById('mineru-formula').checked = mu.enable_formula !== false;
+  document.getElementById('mineru-fallback').checked = mu.fallback_to_local !== false;
+
+  document.getElementById('ocr-backend').onchange = () => {
+    document.getElementById('mineru-card').style.display =
+      document.getElementById('ocr-backend').value === 'mineru' ? 'block' : 'none';
+  };
+}
+
+async function saveOCRConfig() {
+  const r = await api('PUT', '/admin/config', {
+    parse_backend: document.getElementById('ocr-backend').value,
+    ocr: {
+      engine: document.getElementById('ocr-engine').value,
+      language: document.getElementById('ocr-lang').value,
+      pdf_dpi: parseInt(document.getElementById('ocr-dpi').value),
+      upscale_factor: parseFloat(document.getElementById('ocr-upscale').value),
+      binary_threshold: parseInt(document.getElementById('ocr-threshold').value),
+      preprocess: document.getElementById('ocr-preprocess').checked,
+      sharpen: document.getElementById('ocr-sharpen').checked,
+      auto_rotate: document.getElementById('ocr-autorotate').checked,
+    }
+  });
+  if (r) toast('OCR 设置已保存', 'success');
+}
+
+async function saveMinerUConfig() {
+  const r = await api('PUT', '/admin/config', {
+    mineru: {
+      enabled: true,
+      api_base: document.getElementById('mineru-url').value,
+      language: document.getElementById('mineru-lang').value,
+      is_ocr: document.getElementById('mineru-ocr').checked,
+      enable_table: document.getElementById('mineru-table').checked,
+      enable_formula: document.getElementById('mineru-formula').checked,
+      fallback_to_local: document.getElementById('mineru-fallback').checked,
+    }
+  });
+  if (r) toast('MinerU 设置已保存', 'success');
+}
+
+// ── OCR Cache ─────────────────────────────────────────────────────────────────
+async function loadCacheStats() {
+  const [stats, cfg] = await Promise.all([
+    api('GET', '/admin/ocr-cache'),
+    api('GET', '/admin/config'),
+  ]);
+  if (stats) {
+    document.getElementById('cache-count').textContent = stats.count;
+    document.getElementById('cache-size').textContent = stats.total_size_mb + ' MB';
+    document.getElementById('cache-dir').textContent = stats.cache_dir;
+  }
+  if (cfg) {
+    const en = cfg.ocr_cache_enabled !== false;
+    document.getElementById('cache-enabled').checked = en;
+    document.getElementById('cache-enabled-lbl').textContent = en ? '已启用' : '已禁用';
+  }
+}
+
+async function saveCacheEnabled() {
+  const en = document.getElementById('cache-enabled').checked;
+  document.getElementById('cache-enabled-lbl').textContent = en ? '已启用' : '已禁用';
+  const r = await api('PUT', '/admin/config', { ocr_cache_enabled: en });
+  if (r) toast('OCR缓存' + (en ? '已启用' : '已禁用'), 'success');
+}
+
+async function clearCache() {
+  if (!confirm('确定清空所有 OCR 缓存吗？此操作不可撤销。')) return;
+  const r = await api('DELETE', '/admin/ocr-cache');
+  if (r?.ok) { toast(r.message, 'success'); loadCacheStats(); }
+}
+
+// ── OCR Test ──────────────────────────────────────────────────────────────────
+function setupOCRDropzone() {
+  const drop = document.getElementById('ocr-drop');
+  drop.addEventListener('dragover', e => { e.preventDefault(); drop.style.borderColor = 'var(--primary)'; });
+  drop.addEventListener('dragleave', () => { drop.style.borderColor = 'var(--border)'; });
+  drop.addEventListener('drop', e => {
+    e.preventDefault(); drop.style.borderColor = 'var(--border)';
+    const file = e.dataTransfer.files[0];
+    if (file) runOCRTest(file);
+  });
+}
+
+async function runOCRTest(file) {
+  if (!file) return;
+  toast('正在识别 ' + file.name + '...', 'info');
+  const fd = new FormData();
+  fd.append('file', file);
+  const r = await apiForm('/admin/ocr-test', fd);
+  if (!r) return;
+  document.getElementById('ocr-result').style.display = 'block';
+  document.getElementById('ocr-res-file').value = r.filename || '—';
+  document.getElementById('ocr-res-ocr').value = r.used_ocr ? '是' : '否';
+  document.getElementById('ocr-res-backend').value = r.backend || '—';
+  document.getElementById('ocr-res-len').value = (r.text_length || 0) + ' 字符';
+  document.getElementById('ocr-text-out').textContent = r.text_preview || r.text || '';
+  toast('识别完成，共 ' + (r.text_length || 0) + ' 字符', 'success');
+}
+
+// ── Analysis Defaults ─────────────────────────────────────────────────────────
+async function loadAnalysisDefaults() {
+  const cfg = await api('GET', '/admin/config');
+  if (!cfg) return;
+  const a = cfg.analysis || {};
+  setRange('ana-min-len', a.min_word_length || 2);
+  setRange('ana-top-n', a.top_n || 50);
+  document.getElementById('ana-stopwords').checked = a.filter_stopwords || false;
+  document.getElementById('ana-proper').checked = a.keep_proper_nouns !== false;
+  document.getElementById('ana-numbers').checked = a.filter_numbers !== false;
+  document.getElementById('ana-basic').checked = a.filter_basic_words || false;
+  setRange('ana-w-body', a.weight_body || 1.0);
+  setRange('ana-w-stem', a.weight_stem || 1.5);
+  setRange('ana-w-option', a.weight_option || 3.0);
+}
+
+async function saveAnalysisDefaults() {
+  const r = await api('PUT', '/admin/config', {
+    analysis: {
+      min_word_length: parseInt(document.getElementById('ana-min-len').value),
+      top_n: parseInt(document.getElementById('ana-top-n').value),
+      filter_stopwords: document.getElementById('ana-stopwords').checked,
+      keep_proper_nouns: document.getElementById('ana-proper').checked,
+      filter_numbers: document.getElementById('ana-numbers').checked,
+      filter_basic_words: document.getElementById('ana-basic').checked,
+      weight_body: parseFloat(document.getElementById('ana-w-body').value),
+      weight_stem: parseFloat(document.getElementById('ana-w-stem').value),
+      weight_option: parseFloat(document.getElementById('ana-w-option').value),
+    }
+  });
+  if (r) toast('分析设置已保存', 'success');
+}
+
+// ── Storage ───────────────────────────────────────────────────────────────────
+async function loadStorage() {
+  const sys = await api('GET', '/admin/system');
+  if (!sys) return;
+  const rows = [
+    ['临时上传', sys.upload_dir || '—', '文件分析完成后自动删除'],
+    ['持久存档', sys.file_store_dir || '—', '保留所有上传文件的副本'],
+    ['导出文件', 'data/exports/', 'CSV / XLSX 导出结果'],
+    ['OCR 缓存', sys.ocr_cache?.cache_dir || 'data/ocr_cache/', 'OCR 识别结果缓存'],
+    ['数据库', sys.db_path || '—', 'SQLite 数据库'],
+  ];
+  document.getElementById('storage-tbl').innerHTML = rows.map(([type, path, desc]) =>
+    `<tr><td><strong>${type}</strong></td><td><code style="font-size:.82rem">${path}</code></td><td style="color:var(--muted)">${desc}</td></tr>`
+  ).join('');
+}
+
+// ── Users ─────────────────────────────────────────────────────────────────────
+async function loadUsers() {
+  const users = await api('GET', '/admin/users');
+  if (!users) return;
+  document.getElementById('users-tbl').innerHTML = users.map(u => `
+    <tr>
+      <td>${u.id}</td>
+      <td><strong>${u.username}</strong></td>
+      <td>${u.is_admin ? '<span class="badge badge-blue">管理员</span>' : '<span class="badge badge-gray">普通用户</span>'}</td>
+      <td>${u.exam_count || 0}</td>
+      <td>${u.dict_count || 0}</td>
+      <td style="color:var(--muted);font-size:.8rem">${u.created_at?.split('T')[0] || '—'}</td>
+      <td>
+        <button class="btn btn-sm btn-ghost" onclick="resetPwd(${u.id}, '${u.username}')">重置密码</button>
+        ${!u.is_admin ? `<button class="btn btn-sm btn-danger" onclick="deleteUser(${u.id}, '${u.username}')">删除</button>` : ''}
+      </td>
+    </tr>
+  `).join('');
+}
+
+function showCreateUser() {
+  document.getElementById('create-user-form').style.display = 'block';
+  document.getElementById('nu-user').focus();
+}
+
+async function createUser() {
+  const username = document.getElementById('nu-user').value.trim();
+  const password = document.getElementById('nu-pass').value;
+  const is_admin = document.getElementById('nu-admin').checked;
+  if (!username || !password) { toast('请填写用户名和密码', 'error'); return; }
+  const r = await api('POST', '/admin/users', { username, password, is_admin });
+  if (r?.id) {
+    toast('用户 ' + username + ' 创建成功', 'success');
+    document.getElementById('create-user-form').style.display = 'none';
+    document.getElementById('nu-user').value = '';
+    document.getElementById('nu-pass').value = '';
+    loadUsers();
+  } else {
+    toast(r?.detail || '创建失败', 'error');
+  }
+}
+
+async function resetPwd(id, name) {
+  const pwd = prompt(`重置 "${name}" 的密码（留空取消）:`);
+  if (!pwd) return;
+  const r = await api('POST', '/admin/users/' + id + '/reset-password', { new_password: pwd });
+  if (r?.ok) toast('密码已重置', 'success');
+  else toast(r?.detail || '重置失败', 'error');
+}
+
+async function deleteUser(id, name) {
+  if (!confirm(`确定删除用户 "${name}"？相关试卷和词汇表也会被一并删除。`)) return;
+  const r = await api('DELETE', '/admin/users/' + id);
+  if (r?.ok) { toast('用户已删除', 'success'); loadUsers(); }
+  else toast(r?.detail || '删除失败', 'error');
+}
+
+// ── System ────────────────────────────────────────────────────────────────────
+async function loadSystem() {
+  const sys = await api('GET', '/admin/system');
+  if (!sys) return;
+  const pkg = sys.packages || {};
+  document.getElementById('sys-content').innerHTML = `
+    <div class="grid-2">
+      <div class="card">
+        <div class="card-title"><span class="left">🐍 运行环境</span></div>
+        <table class="tbl" style="font-size:.82rem">
+          <tr><td style="color:var(--muted)">Python</td><td>${sys.python_version?.split(' ')[0] || '—'}</td></tr>
+          <tr><td style="color:var(--muted)">spaCy 模型</td><td>${sys.spacy_model_loaded ? '<span class="badge badge-green">已加载</span>' : '<span class="badge badge-red">未加载</span>'}</td></tr>
+          <tr><td style="color:var(--muted)">上传目录</td><td><code>${sys.upload_dir || '—'}</code></td></tr>
+          <tr><td style="color:var(--muted)">数据库</td><td><code>${sys.db_path || '—'}</code></td></tr>
+        </table>
+      </div>
+      <div class="card">
+        <div class="card-title"><span class="left">📦 依赖包版本</span></div>
+        <table class="tbl" style="font-size:.82rem">
+          ${Object.entries(pkg).map(([k,v]) => `<tr><td style="color:var(--muted)">${k}</td><td>${v}</td></tr>`).join('')}
+        </table>
+      </div>
+    </div>
+    <div class="card">
+      <div class="card-title"><span class="left">🔑 API 密钥状态</span></div>
+      <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:.75rem">
+        ${[
+          ['Anthropic (Claude)', sys.has_anthropic_key],
+          ['DeepSeek', sys.has_deepseek_key],
+          ['OpenAI', sys.has_openai_key],
+          ['Merriam-Webster', sys.has_mw_key],
+          ['有道词典', sys.has_youdao_key],
+          ['ECDICT', sys.has_ecdict],
+        ].map(([name, ok]) => `
+          <div style="display:flex;align-items:center;gap:.5rem;font-size:.875rem">
+            <span class="dot ${ok ? 'dot-green' : 'dot-yellow'}"></span>
+            <span>${name}</span>
+            <span class="badge ${ok ? 'badge-green' : 'badge-gray'}">${ok ? '已配置' : '未配置'}</span>
+          </div>`).join('')}
+      </div>
+    </div>
+  `;
+}
+
+// ── Helpers ───────────────────────────────────────────────────────────────────
+function setVal(id, val) { const el = document.getElementById(id); if (el) el.value = val; }
+function setRange(id, val) {
+  const el = document.getElementById(id);
+  if (!el) return;
+  el.value = val;
+  if (el.nextElementSibling) el.nextElementSibling.textContent = val;
+}
+
+// Setup dropzone after DOM loads
+document.addEventListener('DOMContentLoaded', () => {
+  setupOCRDropzone();
+});
+</script>
+</body>
+</html>

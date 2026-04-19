@@ -1,0 +1,856 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>管理后台 — 英语试卷词频分析器</title>
+<style>
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+:root {
+  --primary: #2563eb; --primary-dk: #1d4ed8;
+  --success: #16a34a; --warn: #d97706; --danger: #dc2626;
+  --bg: #f1f5f9; --card: #ffffff; --border: #e2e8f0;
+  --text: #1e293b; --muted: #64748b; --radius: 10px;
+  --sidebar: #1e293b; --sidebar-text: #cbd5e1; --sidebar-active: #2563eb;
+  --shadow: 0 1px 4px rgba(0,0,0,.08), 0 4px 16px rgba(0,0,0,.06);
+}
+body { font-family: "Segoe UI", system-ui, sans-serif; background: var(--bg); color: var(--text); min-height: 100vh; display: flex; }
+
+/* ── Login overlay ── */
+#login-overlay {
+  position: fixed; inset: 0; background: #0f172a;
+  display: flex; align-items: center; justify-content: center; z-index: 100;
+}
+.login-box {
+  background: var(--card); border-radius: 14px; padding: 2.5rem;
+  width: 100%; max-width: 380px; box-shadow: 0 20px 60px rgba(0,0,0,.4);
+}
+.login-logo { text-align: center; margin-bottom: 1.75rem; }
+.login-logo h1 { font-size: 1.3rem; font-weight: 800; color: var(--text); margin-top: .5rem; }
+.login-logo p { font-size: .85rem; color: var(--muted); margin-top: .25rem; }
+.form-group { margin-bottom: 1rem; }
+.form-group label { display: block; font-size: .8rem; font-weight: 600; color: var(--muted); margin-bottom: .35rem; text-transform: uppercase; letter-spacing: .04em; }
+.form-group input {
+  width: 100%; padding: .6rem .85rem; border: 1.5px solid var(--border);
+  border-radius: 8px; font-size: .95rem; outline: none; transition: border-color .2s;
+}
+.form-group input:focus { border-color: var(--primary); }
+.err-msg { font-size: .82rem; color: var(--danger); margin-top: .5rem; min-height: 1.2em; }
+
+/* ── Layout ── */
+#admin-app { display: none; width: 100%; }
+.sidebar {
+  width: 230px; min-height: 100vh; background: var(--sidebar);
+  display: flex; flex-direction: column; position: fixed; top: 0; left: 0; bottom: 0;
+  z-index: 10; overflow-y: auto;
+}
+.sidebar-header { padding: 1.5rem 1.25rem 1rem; border-bottom: 1px solid rgba(255,255,255,.08); }
+.sidebar-header h2 { font-size: .95rem; font-weight: 800; color: #fff; }
+.sidebar-header p { font-size: .75rem; color: var(--sidebar-text); opacity: .7; margin-top: .2rem; }
+.sidebar-nav { flex: 1; padding: .75rem 0; }
+.nav-item {
+  display: flex; align-items: center; gap: .65rem; padding: .65rem 1.25rem;
+  color: var(--sidebar-text); font-size: .875rem; font-weight: 500; cursor: pointer;
+  border: none; background: none; width: 100%; text-align: left; transition: background .15s;
+}
+.nav-item:hover { background: rgba(255,255,255,.06); }
+.nav-item.active { background: var(--sidebar-active); color: #fff; font-weight: 700; }
+.nav-item .icon { font-size: 1rem; width: 1.25rem; text-align: center; }
+.sidebar-footer { padding: 1rem 1.25rem; border-top: 1px solid rgba(255,255,255,.08); }
+.sidebar-footer .user-info { font-size: .78rem; color: var(--sidebar-text); opacity: .7; }
+
+.main-area { margin-left: 230px; flex: 1; min-height: 100vh; display: flex; flex-direction: column; }
+.topbar {
+  background: var(--card); border-bottom: 1px solid var(--border);
+  padding: .875rem 2rem; display: flex; align-items: center; justify-content: space-between;
+  position: sticky; top: 0; z-index: 5;
+}
+.topbar h1 { font-size: 1.1rem; font-weight: 800; }
+.topbar .actions { display: flex; gap: .75rem; align-items: center; }
+.content { padding: 2rem; flex: 1; }
+
+/* ── Cards ── */
+.card { background: var(--card); border: 1px solid var(--border); border-radius: var(--radius); box-shadow: var(--shadow); padding: 1.5rem; margin-bottom: 1.5rem; }
+.card-title { font-size: 1rem; font-weight: 700; margin-bottom: 1.25rem; display: flex; align-items: center; justify-content: space-between; }
+.section { display: none; }
+.section.active { display: block; }
+
+/* ── Stats grid ── */
+.stats-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(160px, 1fr)); gap: 1rem; margin-bottom: 1.5rem; }
+.stat-card { background: var(--card); border: 1px solid var(--border); border-radius: var(--radius); padding: 1.25rem; text-align: center; }
+.stat-card .value { font-size: 2rem; font-weight: 800; color: var(--primary); }
+.stat-card .label { font-size: .78rem; font-weight: 600; color: var(--muted); margin-top: .25rem; text-transform: uppercase; letter-spacing: .04em; }
+
+/* ── Chips ── */
+.chip { display: inline-flex; align-items: center; gap: .3rem; padding: .2rem .6rem; border-radius: 20px; font-size: .75rem; font-weight: 700; }
+.chip-ok { background: #dcfce7; color: #16a34a; }
+.chip-warn { background: #fef3c7; color: #92400e; }
+.chip-err { background: #fee2e2; color: #dc2626; }
+
+/* ── Tables ── */
+.tbl-wrap { overflow-x: auto; }
+table { width: 100%; border-collapse: collapse; font-size: .875rem; }
+th { text-align: left; font-size: .75rem; font-weight: 700; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; padding: .6rem .75rem; border-bottom: 2px solid var(--border); }
+td { padding: .6rem .75rem; border-bottom: 1px solid var(--border); vertical-align: middle; }
+tr:last-child td { border-bottom: none; }
+tr:hover td { background: #f8fafc; }
+.mono { font-family: "Courier New", monospace; font-weight: 800; letter-spacing: .05em; }
+.mono-blue { color: var(--primary); }
+.mono-green { color: var(--success); }
+
+/* ── Buttons ── */
+.btn { display: inline-flex; align-items: center; gap: .4rem; padding: .55rem 1.2rem; border-radius: 8px; border: none; font-size: .875rem; font-weight: 600; cursor: pointer; transition: opacity .15s, transform .1s; }
+.btn:hover { opacity: .88; }
+.btn:active { transform: scale(.98); }
+.btn-primary { background: var(--primary); color: #fff; }
+.btn-success { background: var(--success); color: #fff; }
+.btn-danger { background: var(--danger); color: #fff; }
+.btn-outline { background: transparent; border: 1.5px solid var(--border); color: var(--text); }
+.btn-warn { background: var(--warn); color: #fff; }
+.btn-sm { padding: .3rem .75rem; font-size: .8rem; }
+.btn:disabled { opacity: .4; cursor: not-allowed; }
+.btn-row { display: flex; flex-wrap: wrap; gap: .75rem; margin-top: 1rem; }
+
+/* ── Form elements ── */
+.settings-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 1.5rem; }
+.settings-card { background: var(--bg); border: 1px solid var(--border); border-radius: var(--radius); padding: 1.25rem; }
+.settings-card h3 { font-size: .85rem; font-weight: 800; color: var(--muted); text-transform: uppercase; letter-spacing: .06em; margin-bottom: 1rem; padding-bottom: .5rem; border-bottom: 1px solid var(--border); }
+.field { margin-bottom: .85rem; }
+.field label { display: block; font-size: .8rem; font-weight: 600; color: var(--muted); margin-bottom: .3rem; }
+.field input[type=text], .field input[type=number], .field input[type=password], .field select, .field textarea {
+  width: 100%; padding: .45rem .7rem; border: 1.5px solid var(--border);
+  border-radius: 6px; font-size: .875rem; background: var(--card); outline: none; transition: border-color .2s;
+}
+.field input:focus, .field select:focus, .field textarea:focus { border-color: var(--primary); }
+.field textarea { resize: vertical; min-height: 80px; font-family: monospace; font-size: .8rem; }
+.toggle-field { display: flex; align-items: center; justify-content: space-between; margin-bottom: .85rem; }
+.toggle-field label { font-size: .85rem; font-weight: 600; color: var(--text); }
+.switch { position: relative; width: 38px; height: 22px; }
+.switch input { display: none; }
+.slider { position: absolute; inset: 0; background: var(--border); border-radius: 22px; cursor: pointer; transition: background .2s; }
+.slider::before { content: ""; position: absolute; width: 16px; height: 16px; left: 3px; top: 3px; background: #fff; border-radius: 50%; transition: transform .2s; }
+.switch input:checked + .slider { background: var(--primary); }
+.switch input:checked + .slider::before { transform: translateX(16px); }
+
+/* ── Status messages ── */
+.status-msg { font-size: .82rem; padding: .4rem .75rem; border-radius: 6px; }
+.status-msg.ok { background: #dcfce7; color: #16a34a; }
+.status-msg.err { background: #fee2e2; color: #dc2626; }
+.status-msg.info { background: #dbeafe; color: #1d4ed8; }
+.loading { color: var(--muted); font-style: italic; font-size: .875rem; padding: 1rem; text-align: center; }
+
+/* ── OCR test section ── */
+.ocr-drop {
+  border: 2px dashed var(--border); border-radius: var(--radius);
+  padding: 2rem; text-align: center; cursor: pointer; transition: border-color .2s, background .2s;
+  margin-bottom: 1rem;
+}
+.ocr-drop:hover, .ocr-drop.drag-over { border-color: var(--primary); background: #eff6ff; }
+.ocr-result { background: #0f172a; color: #e2e8f0; border-radius: var(--radius); padding: 1.25rem; font-family: monospace; font-size: .8rem; max-height: 400px; overflow-y: auto; white-space: pre-wrap; word-break: break-word; }
+
+/* ── Reset form inline ── */
+.inline-form { display: none; align-items: center; gap: .5rem; margin-top: .5rem; flex-wrap: wrap; }
+.inline-form.visible { display: flex; }
+.inline-form input { padding: .35rem .6rem; border: 1.5px solid var(--border); border-radius: 6px; font-size: .82rem; outline: none; }
+.inline-form input:focus { border-color: var(--primary); }
+.inline-msg { font-size: .78rem; }
+.inline-msg.ok { color: var(--success); }
+.inline-msg.err { color: var(--danger); }
+
+/* ── Modal ── */
+.modal { display: none; position: fixed; inset: 0; background: rgba(0,0,0,.5); align-items: center; justify-content: center; z-index: 50; }
+.modal.open { display: flex; }
+.modal-box { background: var(--card); border-radius: 14px; padding: 2rem; width: 100%; max-width: 440px; box-shadow: 0 20px 60px rgba(0,0,0,.3); }
+.modal-title { font-size: 1rem; font-weight: 800; margin-bottom: 1.25rem; }
+
+/* ── Info boxes ── */
+.info-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: .75rem; }
+.info-row { display: flex; justify-content: space-between; align-items: center; padding: .4rem 0; border-bottom: 1px solid var(--border); font-size: .85rem; }
+.info-row:last-child { border-bottom: none; }
+.info-key { color: var(--muted); font-weight: 600; }
+.info-val { font-weight: 700; word-break: break-all; max-width: 200px; text-align: right; }
+
+/* ── Responsive ── */
+@media (max-width: 768px) {
+  .sidebar { width: 60px; }
+  .nav-item span { display: none; }
+  .sidebar-header h2, .sidebar-header p, .sidebar-footer { display: none; }
+  .main-area { margin-left: 60px; }
+}
+</style>
+</head>
+<body>
+
+<!-- ── Login overlay ── -->
+<div id="login-overlay">
+  <div class="login-box">
+    <div class="login-logo">
+      <div style="font-size:2.5rem">🛡️</div>
+      <h1>管理后台</h1>
+      <p>英语试卷词频分析器</p>
+    </div>
+    <div class="form-group">
+      <label>用户名</label>
+      <input type="text" id="l-user" placeholder="管理员账号" onkeydown="if(event.key==='Enter')doLogin()" />
+    </div>
+    <div class="form-group">
+      <label>密码</label>
+      <input type="password" id="l-pass" placeholder="密码" onkeydown="if(event.key==='Enter')doLogin()" />
+    </div>
+    <button class="btn btn-primary" style="width:100%;margin-top:.5rem" onclick="doLogin()">登 录</button>
+    <div class="err-msg" id="login-err"></div>
+    <div style="text-align:center;margin-top:1.25rem">
+      <a href="/" style="font-size:.8rem;color:var(--primary)">← 返回主应用</a>
+    </div>
+  </div>
+</div>
+
+<!-- ── Admin app ── -->
+<div id="admin-app">
+  <!-- Sidebar -->
+  <aside class="sidebar">
+    <div class="sidebar-header">
+      <h2>管理后台</h2>
+      <p>英语词频分析器</p>
+    </div>
+    <nav class="sidebar-nav">
+      <button class="nav-item active" onclick="nav('overview',this)" data-section="overview">
+        <span class="icon">📊</span><span>系统概览</span>
+      </button>
+      <button class="nav-item" onclick="nav('users',this)" data-section="users">
+        <span class="icon">👥</span><span>用户管理</span>
+      </button>
+      <button class="nav-item" onclick="nav('codes',this)" data-section="codes">
+        <span class="icon">🗂️</span><span>试卷 / 词典码</span>
+      </button>
+      <button class="nav-item" onclick="nav('config',this)" data-section="config">
+        <span class="icon">⚙️</span><span>系统配置</span>
+      </button>
+      <button class="nav-item" onclick="nav('ocr',this)" data-section="ocr">
+        <span class="icon">🔬</span><span>OCR 测试</span>
+      </button>
+      <button class="nav-item" onclick="nav('system',this)" data-section="system">
+        <span class="icon">🖥️</span><span>系统信息</span>
+      </button>
+    </nav>
+    <div class="sidebar-footer">
+      <div class="user-info" id="sidebar-user">未登录</div>
+      <button class="btn btn-sm btn-outline" style="margin-top:.5rem;color:#cbd5e1;border-color:#475569;width:100%" onclick="doLogout()">退出登录</button>
+    </div>
+  </aside>
+
+  <!-- Main area -->
+  <div class="main-area">
+    <div class="topbar">
+      <h1 id="section-title">系统概览</h1>
+      <div class="actions">
+        <a href="/" class="btn btn-outline btn-sm">← 返回主应用</a>
+        <button class="btn btn-outline btn-sm" onclick="reloadSection()">🔄 刷新</button>
+      </div>
+    </div>
+
+    <div class="content">
+
+      <!-- ── Overview ── -->
+      <div class="section active" id="sec-overview">
+        <div class="stats-grid" id="stats-grid">
+          <div class="stat-card"><div class="value">—</div><div class="label">用户数</div></div>
+          <div class="stat-card"><div class="value">—</div><div class="label">管理员数</div></div>
+          <div class="stat-card"><div class="value">—</div><div class="label">试卷数</div></div>
+          <div class="stat-card"><div class="value">—</div><div class="label">词典数</div></div>
+        </div>
+        <div class="card">
+          <div class="card-title">OCR 能力</div>
+          <div id="ocr-caps">加载中…</div>
+        </div>
+        <div class="card">
+          <div class="card-title">运行时配置摘要</div>
+          <div id="config-summary">加载中…</div>
+        </div>
+      </div>
+
+      <!-- ── Users ── -->
+      <div class="section" id="sec-users">
+        <div class="card">
+          <div class="card-title">
+            用户列表
+            <button class="btn btn-primary btn-sm" onclick="document.getElementById('create-user-modal').classList.add('open')">+ 新建用户</button>
+          </div>
+          <div id="users-table">加载中…</div>
+        </div>
+      </div>
+
+      <!-- ── Codes ── -->
+      <div class="section" id="sec-codes">
+        <div class="card">
+          <div class="card-title">试卷码</div>
+          <div id="exams-table">加载中…</div>
+        </div>
+        <div class="card">
+          <div class="card-title">词典码</div>
+          <div id="dicts-table">加载中…</div>
+        </div>
+      </div>
+
+      <!-- ── Config ── -->
+      <div class="section" id="sec-config">
+        <div class="card">
+          <div class="card-title">系统配置</div>
+          <div id="config-form">加载中…</div>
+        </div>
+      </div>
+
+      <!-- ── OCR Test ── -->
+      <div class="section" id="sec-ocr">
+        <div class="card">
+          <div class="card-title">OCR 文本提取测试</div>
+          <p style="font-size:.85rem;color:var(--muted);margin-bottom:1rem">上传图片或PDF，查看提取的原始文本（用于诊断OCR效果）</p>
+          <div class="ocr-drop" id="ocr-drop" onclick="document.getElementById('ocr-file-input').click()"
+               ondragover="event.preventDefault();this.classList.add('drag-over')"
+               ondragleave="this.classList.remove('drag-over')"
+               ondrop="event.preventDefault();this.classList.remove('drag-over');handleOcrFile(event.dataTransfer.files[0])">
+            <div style="font-size:2rem">📄</div>
+            <p style="margin-top:.5rem;color:var(--muted)">点击或拖放文件（图片 / PDF / DOCX / TXT）</p>
+          </div>
+          <input type="file" id="ocr-file-input" style="display:none" accept=".png,.jpg,.jpeg,.bmp,.tif,.tiff,.webp,.pdf,.docx,.txt" onchange="handleOcrFile(this.files[0])" />
+          <div id="ocr-status" style="margin-bottom:1rem"></div>
+          <div id="ocr-result-wrap" style="display:none">
+            <div style="display:flex;gap:1rem;align-items:center;margin-bottom:.75rem;flex-wrap:wrap">
+              <span id="ocr-meta" style="font-size:.82rem;color:var(--muted)"></span>
+              <button class="btn btn-outline btn-sm" onclick="copyOcrText()">复制文本</button>
+            </div>
+            <div class="ocr-result" id="ocr-result-text"></div>
+          </div>
+        </div>
+      </div>
+
+      <!-- ── System ── -->
+      <div class="section" id="sec-system">
+        <div class="card">
+          <div class="card-title">Python 环境</div>
+          <div id="sys-info">加载中…</div>
+        </div>
+      </div>
+
+    </div><!-- /content -->
+  </div><!-- /main-area -->
+</div><!-- /admin-app -->
+
+<!-- ── Create user modal ── -->
+<div class="modal" id="create-user-modal">
+  <div class="modal-box">
+    <div class="modal-title">新建用户</div>
+    <div class="field">
+      <label>用户名</label>
+      <input type="text" id="cu-username" placeholder="字母/数字/下划线，2-32位" />
+    </div>
+    <div class="field">
+      <label>密码</label>
+      <input type="password" id="cu-password" placeholder="至少 6 位" />
+    </div>
+    <div class="toggle-field">
+      <label>设为管理员</label>
+      <label class="switch"><input type="checkbox" id="cu-admin" /><span class="slider"></span></label>
+    </div>
+    <div class="err-msg" id="cu-err"></div>
+    <div class="btn-row">
+      <button class="btn btn-primary" onclick="doCreateUser()">创建</button>
+      <button class="btn btn-outline" onclick="document.getElementById('create-user-modal').classList.remove('open')">取消</button>
+    </div>
+  </div>
+</div>
+
+<script>
+'use strict';
+let ADMIN_TOKEN = localStorage.getItem('admin_token') || '';
+const sections = ['overview','users','codes','config','ocr','system'];
+const sectionTitles = {
+  overview: '系统概览', users: '用户管理', codes: '试卷 / 词典码',
+  config: '系统配置', ocr: 'OCR 测试', system: '系统信息',
+};
+let currentSection = 'overview';
+
+function esc(s) {
+  return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+function fmtDate(iso) {
+  if (!iso) return '—';
+  const d = new Date(iso);
+  return d.toLocaleDateString('zh-CN') + ' ' + d.toLocaleTimeString('zh-CN', {hour:'2-digit',minute:'2-digit'});
+}
+function apiFetch(url, opts={}) {
+  opts.headers = opts.headers || {};
+  if (ADMIN_TOKEN && !(opts.body instanceof FormData)) {
+    opts.headers['Authorization'] = 'Bearer ' + ADMIN_TOKEN;
+    opts.headers['Content-Type'] = opts.headers['Content-Type'] || 'application/json';
+  } else if (ADMIN_TOKEN) {
+    opts.headers['Authorization'] = 'Bearer ' + ADMIN_TOKEN;
+  }
+  return fetch(url, opts);
+}
+
+// ── Auth ──
+async function doLogin() {
+  const err = document.getElementById('login-err');
+  err.textContent = '';
+  const username = document.getElementById('l-user').value.trim();
+  const password = document.getElementById('l-pass').value;
+  if (!username || !password) { err.textContent = '请填写用户名和密码'; return; }
+  try {
+    const resp = await fetch('/auth/login', {
+      method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({username, password}),
+    });
+    const data = await resp.json();
+    if (!resp.ok) { err.textContent = data.detail || '登录失败'; return; }
+    if (!data.is_admin) { err.textContent = '该账号没有管理员权限'; return; }
+    const token = data.token || data.access_token;
+    if (!token) { err.textContent = '登录成功，但未收到有效 token'; return; }
+    ADMIN_TOKEN = token;
+    localStorage.setItem('admin_token', ADMIN_TOKEN);
+    document.getElementById('login-overlay').style.display = 'none';
+    document.getElementById('admin-app').style.display = 'flex';
+    document.getElementById('sidebar-user').textContent = data.username || username;
+    await loadSection('overview');
+  } catch(e) { err.textContent = '网络错误：' + e.message; }
+}
+
+function doLogout() {
+  ADMIN_TOKEN = '';
+  localStorage.removeItem('admin_token');
+  location.reload();
+}
+
+async function checkAuth() {
+  if (!ADMIN_TOKEN) return;
+  try {
+    const resp = await apiFetch('/auth/me');
+    const data = await resp.json();
+    if (!resp.ok || !data.is_admin) { doLogout(); return; }
+    document.getElementById('login-overlay').style.display = 'none';
+    document.getElementById('admin-app').style.display = 'flex';
+    document.getElementById('sidebar-user').textContent = data.username;
+    await loadSection('overview');
+  } catch { doLogout(); }
+}
+
+// ── Navigation ──
+function nav(section, btn) {
+  document.querySelectorAll('.nav-item').forEach(b => b.classList.remove('active'));
+  if (btn) btn.classList.add('active');
+  sections.forEach(s => document.getElementById('sec-'+s).classList.remove('active'));
+  document.getElementById('sec-'+section).classList.add('active');
+  document.getElementById('section-title').textContent = sectionTitles[section] || section;
+  currentSection = section;
+  loadSection(section);
+}
+
+function reloadSection() { loadSection(currentSection); }
+
+async function loadSection(s) {
+  if (s === 'overview') await loadOverview();
+  else if (s === 'users') await loadUsers();
+  else if (s === 'codes') await loadCodes();
+  else if (s === 'config') await loadConfig();
+  else if (s === 'system') await loadSystem();
+}
+
+// ── Overview ──
+async function loadOverview() {
+  try {
+    const resp = await apiFetch('/admin/overview');
+    const data = await resp.json();
+    const caps = data.ocr_capabilities || {};
+    const cfg = data.runtime_config || {};
+    const analysis = cfg.analysis || {};
+    const ocr = cfg.ocr || {};
+
+    document.getElementById('stats-grid').innerHTML = `
+      <div class="stat-card"><div class="value">${data.users||0}</div><div class="label">用户数</div></div>
+      <div class="stat-card"><div class="value">${data.admins||0}</div><div class="label">管理员</div></div>
+      <div class="stat-card"><div class="value">${data.exams||0}</div><div class="label">试卷数</div></div>
+      <div class="stat-card"><div class="value">${data.dicts||0}</div><div class="label">词典数</div></div>`;
+
+    document.getElementById('ocr-caps').innerHTML = `
+      <div style="display:flex;gap:.5rem;flex-wrap:wrap;margin-bottom:.75rem">
+        <span class="chip ${caps.rapidocr?'chip-ok':'chip-warn'}">RapidOCR ${caps.rapidocr?'✓ 可用':'✗ 不可用'}</span>
+        <span class="chip ${caps.pytesseract?'chip-ok':'chip-warn'}">pytesseract ${caps.pytesseract?'✓ 已安装':'✗ 未安装'}</span>
+        <span class="chip ${caps.tesseract_configured?'chip-ok':'chip-warn'}">Tesseract路径 ${caps.tesseract_configured?'✓ 已配置':'✗ 未配置'}</span>
+      </div>
+      ${caps.tesseract_cmd ? `<div style="font-size:.8rem;color:var(--muted)">路径：${esc(caps.tesseract_cmd)}</div>` : ''}`;
+
+    document.getElementById('config-summary').innerHTML = `
+      <div class="info-grid">
+        <div>
+          <div class="info-row"><span class="info-key">词汇提供源</span><span class="info-val">${esc(cfg.vocab_provider||'—')}</span></div>
+          <div class="info-row"><span class="info-key">AI 模型</span><span class="info-val" style="font-size:.8rem">${esc(cfg.ai_model||'—')}</span></div>
+          <div class="info-row"><span class="info-key">AI 批量大小</span><span class="info-val">${esc(cfg.ai_batch_size||'—')}</span></div>
+          <div class="info-row"><span class="info-key">开放注册</span><span class="info-val">${cfg.registration_enabled?'✓ 开放':'✗ 关闭'}</span></div>
+          <div class="info-row"><span class="info-key">解析后端</span><span class="info-val">${esc(cfg.parse_backend||'local')}</span></div>
+        </div>
+        <div>
+          <div class="info-row"><span class="info-key">OCR 引擎</span><span class="info-val">${esc(ocr.engine||'auto')}</span></div>
+          <div class="info-row"><span class="info-key">PDF OCR 阈值</span><span class="info-val">${esc(ocr.pdf_ocr_threshold??50)} 字符</span></div>
+          <div class="info-row"><span class="info-key">最短词长</span><span class="info-val">${esc(analysis.min_word_length||2)}</span></div>
+          <div class="info-row"><span class="info-key">词汇 Top-N</span><span class="info-val">${esc(analysis.top_n||50)}</span></div>
+          <div class="info-row"><span class="info-key">过滤停用词</span><span class="info-val">${analysis.filter_stopwords?'是':'否'}</span></div>
+        </div>
+      </div>`;
+  } catch(e) {
+    document.getElementById('stats-grid').innerHTML = `<div style="color:var(--danger)">${e.message}</div>`;
+  }
+}
+
+// ── Users ──
+async function loadUsers() {
+  const el = document.getElementById('users-table');
+  el.innerHTML = '<div class="loading">加载中…</div>';
+  try {
+    const resp = await apiFetch('/admin/users');
+    const users = await resp.json();
+    if (!users.length) { el.innerHTML = '<div class="loading">暂无用户</div>'; return; }
+    el.innerHTML = `<div class="tbl-wrap"><table>
+      <thead><tr><th>#</th><th>用户名</th><th>角色</th><th>试卷</th><th>词典</th><th>注册时间</th><th>操作</th></tr></thead>
+      <tbody>${users.map(u => `
+        <tr id="urow-${u.id}">
+          <td style="color:var(--muted);font-size:.8rem">${u.id}</td>
+          <td><b>${esc(u.username)}</b></td>
+          <td><span class="chip ${u.is_admin?'chip-ok':'chip-warn'}">${u.is_admin?'管理员':'用户'}</span></td>
+          <td>${u.exam_count}</td><td>${u.dict_count}</td>
+          <td style="font-size:.78rem;color:var(--muted)">${fmtDate(u.created_at)}</td>
+          <td>
+            <div style="display:flex;gap:.4rem;flex-wrap:wrap">
+              ${!u.is_admin ? `
+                <button class="btn btn-outline btn-sm" onclick="toggleResetForm(${u.id})">重置密码</button>
+                <button class="btn btn-danger btn-sm" onclick="deleteUser(${u.id},'${esc(u.username)}')">删除</button>
+              ` : '<span style="color:var(--muted);font-size:.78rem">受保护</span>'}
+            </div>
+            <div class="inline-form" id="reset-form-${u.id}">
+              <input type="password" id="reset-pw-${u.id}" placeholder="新密码（至少6位）" style="width:160px" />
+              <button class="btn btn-danger btn-sm" onclick="doResetPw(${u.id})">确认</button>
+              <button class="btn btn-outline btn-sm" onclick="toggleResetForm(${u.id})">取消</button>
+              <span class="inline-msg" id="reset-msg-${u.id}"></span>
+            </div>
+          </td>
+        </tr>`).join('')}
+      </tbody></table></div>`;
+  } catch(e) { el.innerHTML = `<div style="color:var(--danger)">${e.message}</div>`; }
+}
+
+function toggleResetForm(id) {
+  document.getElementById('reset-form-'+id).classList.toggle('visible');
+}
+
+async function doResetPw(id) {
+  const pw = document.getElementById('reset-pw-'+id).value;
+  const msg = document.getElementById('reset-msg-'+id);
+  msg.className = 'inline-msg'; msg.textContent = '';
+  if (!pw || pw.length < 6) { msg.className='inline-msg err'; msg.textContent='密码至少6位'; return; }
+  try {
+    const resp = await apiFetch(`/admin/users/${id}/reset-password`, {
+      method:'POST', body: JSON.stringify({new_password:pw}),
+    });
+    const data = await resp.json();
+    if (!resp.ok) { msg.className='inline-msg err'; msg.textContent=data.detail||'失败'; return; }
+    msg.className='inline-msg ok'; msg.textContent='已重置';
+    document.getElementById('reset-pw-'+id).value = '';
+    setTimeout(() => toggleResetForm(id), 1500);
+  } catch(e) { msg.className='inline-msg err'; msg.textContent=e.message; }
+}
+
+async function deleteUser(id, name) {
+  if (!confirm(`确认删除用户「${name}」？该用户的所有试卷和词典也会被删除。`)) return;
+  try {
+    const resp = await apiFetch(`/admin/users/${id}`, {method:'DELETE'});
+    const data = await resp.json();
+    if (!resp.ok) { alert(data.detail||'删除失败'); return; }
+    await loadUsers();
+  } catch(e) { alert(e.message); }
+}
+
+async function doCreateUser() {
+  const err = document.getElementById('cu-err');
+  err.textContent = '';
+  const username = document.getElementById('cu-username').value.trim();
+  const password = document.getElementById('cu-password').value;
+  const is_admin = document.getElementById('cu-admin').checked;
+  try {
+    const resp = await apiFetch('/admin/users', {
+      method:'POST', body: JSON.stringify({username,password,is_admin}),
+    });
+    const data = await resp.json();
+    if (!resp.ok) { err.textContent = data.detail||'创建失败'; return; }
+    document.getElementById('create-user-modal').classList.remove('open');
+    document.getElementById('cu-username').value = '';
+    document.getElementById('cu-password').value = '';
+    document.getElementById('cu-admin').checked = false;
+    await loadUsers();
+  } catch(e) { err.textContent = e.message; }
+}
+
+// ── Codes ──
+async function loadCodes() {
+  document.getElementById('exams-table').innerHTML = '<div class="loading">加载中…</div>';
+  document.getElementById('dicts-table').innerHTML = '<div class="loading">加载中…</div>';
+  try {
+    const resp = await apiFetch('/admin/codes');
+    const data = await resp.json();
+
+    const examsEl = document.getElementById('exams-table');
+    if (!data.exams.length) { examsEl.innerHTML = '<div class="loading">暂无试卷</div>'; }
+    else {
+      examsEl.innerHTML = `<div class="tbl-wrap"><table>
+        <thead><tr><th>试卷码</th><th>文件名</th><th>上传者</th><th>时间</th><th>操作</th></tr></thead>
+        <tbody>${data.exams.map(e => `
+          <tr><td><span class="mono mono-blue">${esc(e.exam_code)}</span></td>
+          <td style="font-size:.83rem">${esc(e.filename)}</td>
+          <td>${esc(e.username)}</td>
+          <td style="font-size:.78rem;color:var(--muted)">${fmtDate(e.created_at)}</td>
+          <td><div style="display:flex;gap:.4rem">
+            <button class="btn btn-outline btn-sm" onclick="window.open('/?exam=${esc(e.exam_code)}','_blank')">查看</button>
+            <button class="btn btn-sm" onclick="copyText('${esc(e.exam_code)}',this)">复制码</button>
+          </div></td></tr>`).join('')}
+        </tbody></table></div>`;
+    }
+
+    const dictsEl = document.getElementById('dicts-table');
+    if (!data.dicts.length) { dictsEl.innerHTML = '<div class="loading">暂无词典</div>'; }
+    else {
+      dictsEl.innerHTML = `<div class="tbl-wrap"><table>
+        <thead><tr><th>词典码</th><th>关联试卷码</th><th>文件名</th><th>上传者</th><th>时间</th><th>操作</th></tr></thead>
+        <tbody>${data.dicts.map(d => `
+          <tr><td><span class="mono mono-green">${esc(d.dict_code)}</span></td>
+          <td>${d.exam_code?`<span class="mono" style="font-size:.85rem">${esc(d.exam_code)}</span>`:'—'}</td>
+          <td style="font-size:.83rem">${esc(d.filename)}</td>
+          <td>${esc(d.username)}</td>
+          <td style="font-size:.78rem;color:var(--muted)">${fmtDate(d.created_at)}</td>
+          <td><div style="display:flex;gap:.4rem">
+            <button class="btn btn-outline btn-sm" onclick="window.open('/?dict=${esc(d.dict_code)}','_blank')">查看</button>
+            <button class="btn btn-sm" onclick="copyText('${esc(d.dict_code)}',this)">复制码</button>
+          </div></td></tr>`).join('')}
+        </tbody></table></div>`;
+    }
+  } catch(e) {
+    document.getElementById('exams-table').innerHTML = `<div style="color:var(--danger)">${e.message}</div>`;
+  }
+}
+
+function copyText(text, btn) {
+  navigator.clipboard.writeText(text).then(() => {
+    const orig = btn.textContent; btn.textContent = '✓ 已复制';
+    setTimeout(() => btn.textContent = orig, 1200);
+  });
+}
+
+// ── Config ──
+async function loadConfig() {
+  const el = document.getElementById('config-form');
+  el.innerHTML = '<div class="loading">加载中…</div>';
+  try {
+    const resp = await apiFetch('/admin/config');
+    const data = await resp.json();
+    if (!resp.ok) throw new Error(data.detail||'加载失败');
+    const cfg = data.config || {};
+    const analysis = cfg.analysis || {};
+    const ocr = cfg.ocr || {};
+    const mineru = cfg.mineru || {};
+    const ea = s => `escAttr_${s}`;
+
+    el.innerHTML = `
+      <div class="settings-grid">
+
+        <div class="settings-card">
+          <h3>分析默认值</h3>
+          <div class="field"><label>最短词长（1-10）</label><input class="cfg-input" id="cfg-min-word-length" type="number" min="1" max="10" value="${analysis.min_word_length??2}" /></div>
+          <div class="field"><label>词汇 Top-N（5-300）</label><input class="cfg-input" id="cfg-top-n" type="number" min="5" max="300" value="${analysis.top_n??50}" /></div>
+          <div class="toggle-field"><label>过滤停用词</label><label class="switch"><input id="cfg-filter-stopwords" type="checkbox"${analysis.filter_stopwords?' checked':''} /><span class="slider"></span></label></div>
+          <div class="toggle-field"><label>保留专有名词</label><label class="switch"><input id="cfg-keep-proper" type="checkbox"${analysis.keep_proper_nouns?' checked':''} /><span class="slider"></span></label></div>
+          <div class="toggle-field"><label>过滤数字</label><label class="switch"><input id="cfg-filter-numbers" type="checkbox"${analysis.filter_numbers?' checked':''} /><span class="slider"></span></label></div>
+          <div class="toggle-field"><label>过滤基础词</label><label class="switch"><input id="cfg-filter-basic" type="checkbox"${analysis.filter_basic_words?' checked':''} /><span class="slider"></span></label></div>
+          <div class="field"><label>基础词 Zipf 阈值（3.0-8.0）</label><input class="cfg-input" id="cfg-basic-threshold" type="number" min="3.0" max="8.0" step="0.1" value="${analysis.basic_words_threshold??5.7}" /></div>
+        </div>
+
+        <div class="settings-card">
+          <h3>词频权重</h3>
+          <div class="field"><label>正文权重</label><input class="cfg-input" id="cfg-weight-body" type="number" step="0.1" value="${analysis.weight_body??1.0}" /></div>
+          <div class="field"><label>题干权重</label><input class="cfg-input" id="cfg-weight-stem" type="number" step="0.1" value="${analysis.weight_stem??1.5}" /></div>
+          <div class="field"><label>选项权重</label><input class="cfg-input" id="cfg-weight-option" type="number" step="0.1" value="${analysis.weight_option??3.0}" /></div>
+          <h3 style="margin-top:1rem">词汇生成</h3>
+          <div class="field"><label>词汇提供源</label><select class="cfg-input" id="cfg-provider">
+            ${(data.providers||[]).map(n => `<option value="${n}"${cfg.vocab_provider===n?' selected':''}>${n}</option>`).join('')}
+          </select></div>
+          <div class="field"><label>AI 模型</label><input class="cfg-input" id="cfg-ai-model" type="text" value="${esc(cfg.ai_model||'')}" /></div>
+          <div class="field"><label>AI 批量大小（1-50）</label><input class="cfg-input" id="cfg-ai-batch-size" type="number" min="1" max="50" value="${cfg.ai_batch_size??20}" /></div>
+        </div>
+
+        <div class="settings-card">
+          <h3>OCR 设置</h3>
+          <div class="field"><label>OCR 引擎</label><select class="cfg-input" id="cfg-ocr-engine">
+            <option value="auto"${ocr.engine==='auto'?' selected':''}>auto（自动）</option>
+            <option value="tesseract"${ocr.engine==='tesseract'?' selected':''}>tesseract</option>
+            <option value="rapidocr"${ocr.engine==='rapidocr'?' selected':''}>rapidocr</option>
+          </select></div>
+          <div class="field"><label>OCR 语言（如 eng, chi_sim+eng）</label><input class="cfg-input" id="cfg-ocr-language" type="text" value="${esc(ocr.language||'eng')}" /></div>
+          <div class="field"><label>PDF DPI（150-600）</label><input class="cfg-input" id="cfg-pdf-dpi" type="number" min="150" max="600" value="${ocr.pdf_dpi??300}" /></div>
+          <div class="field"><label>PDF OCR 阈值（字符数，0=始终OCR）</label><input class="cfg-input" id="cfg-pdf-ocr-threshold" type="number" min="0" max="2000" value="${ocr.pdf_ocr_threshold??50}" /></div>
+          <div class="field"><label>页面分割模式 PSM（3-13）</label><input class="cfg-input" id="cfg-psm" type="number" min="3" max="13" value="${ocr.page_segmentation_mode??6}" /></div>
+          <div class="field"><label>二值化阈值（0-255）</label><input class="cfg-input" id="cfg-threshold" type="number" min="0" max="255" value="${ocr.binary_threshold??180}" /></div>
+          <div class="field"><label>放大倍数（1.0-4.0）</label><input class="cfg-input" id="cfg-upscale" type="number" step="0.1" min="1.0" max="4.0" value="${ocr.upscale_factor??2.0}" /></div>
+          <div class="toggle-field"><label>预处理（去噪 / 增强）</label><label class="switch"><input id="cfg-preprocess" type="checkbox"${ocr.preprocess?' checked':''} /><span class="slider"></span></label></div>
+          <div class="toggle-field"><label>锐化</label><label class="switch"><input id="cfg-sharpen" type="checkbox"${ocr.sharpen?' checked':''} /><span class="slider"></span></label></div>
+          <div class="toggle-field"><label>RapidOCR 失败时回退到 Tesseract</label><label class="switch"><input id="cfg-fallback" type="checkbox"${ocr.fallback_to_tesseract?' checked':''} /><span class="slider"></span></label></div>
+        </div>
+
+        <div class="settings-card">
+          <h3>系统设置</h3>
+          <div class="field"><label>解析后端</label><select class="cfg-input" id="cfg-parse-backend">
+            ${(data.parse_backends||['local','mineru']).map(n => `<option value="${n}"${cfg.parse_backend===n?' selected':''}>${n}</option>`).join('')}
+          </select></div>
+          <div class="toggle-field"><label>保存原始解析结果</label><label class="switch"><input id="cfg-save-raw-parse" type="checkbox"${cfg.save_raw_parse_result?' checked':''} /><span class="slider"></span></label></div>
+          <div class="toggle-field"><label>开放注册</label><label class="switch"><input id="cfg-registration" type="checkbox"${cfg.registration_enabled?' checked':''} /><span class="slider"></span></label></div>
+          <h3 style="margin-top:1rem">MinerU 解析</h3>
+          <div class="toggle-field"><label>启用 MinerU</label><label class="switch"><input id="cfg-mineru-enabled" type="checkbox"${mineru.enabled?' checked':''} /><span class="slider"></span></label></div>
+          <div class="field"><label>API 地址</label><input class="cfg-input" id="cfg-mineru-api-base" type="text" value="${esc(mineru.api_base||'https://mineru.net/api/v1/agent')}" /></div>
+          <div class="field"><label>语言</label><input class="cfg-input" id="cfg-mineru-language" type="text" value="${esc(mineru.language||'en')}" /></div>
+          <div class="field"><label>页范围（如 1-5，留空全部）</label><input class="cfg-input" id="cfg-mineru-page-range" type="text" value="${esc(mineru.page_range||'')}" /></div>
+          <div class="toggle-field"><label>识别表格</label><label class="switch"><input id="cfg-mineru-table" type="checkbox"${mineru.enable_table?' checked':''} /><span class="slider"></span></label></div>
+          <div class="toggle-field"><label>识别公式</label><label class="switch"><input id="cfg-mineru-formula" type="checkbox"${mineru.enable_formula?' checked':''} /><span class="slider"></span></label></div>
+          <div class="toggle-field"><label>MinerU OCR 模式</label><label class="switch"><input id="cfg-mineru-ocr" type="checkbox"${mineru.is_ocr?' checked':''} /><span class="slider"></span></label></div>
+          <div class="toggle-field"><label>MinerU 失败回退本地</label><label class="switch"><input id="cfg-mineru-fallback" type="checkbox"${mineru.fallback_to_local?' checked':''} /><span class="slider"></span></label></div>
+          <div class="field"><label>轮询超时（秒）</label><input class="cfg-input" id="cfg-mineru-timeout" type="number" value="${mineru.poll_timeout_sec??300}" /></div>
+          <div class="field"><label>轮询间隔（秒）</label><input class="cfg-input" id="cfg-mineru-interval" type="number" value="${mineru.poll_interval_sec??3}" /></div>
+        </div>
+
+      </div>
+      <div class="btn-row">
+        <button class="btn btn-primary" onclick="saveConfig()">💾 保存配置</button>
+        <span id="cfg-status" style="font-size:.85rem;color:var(--muted)"></span>
+      </div>`;
+  } catch(e) { el.innerHTML = `<div style="color:var(--danger)">${e.message}</div>`; }
+}
+
+async function saveConfig() {
+  const status = document.getElementById('cfg-status');
+  status.textContent = '保存中…'; status.style.color = 'var(--muted)';
+  const g = id => document.getElementById(id);
+  const payload = {
+    parse_backend: g('cfg-parse-backend').value,
+    save_raw_parse_result: g('cfg-save-raw-parse').checked,
+    registration_enabled: g('cfg-registration').checked,
+    vocab_provider: g('cfg-provider').value,
+    ai_model: g('cfg-ai-model').value.trim(),
+    ai_batch_size: Number(g('cfg-ai-batch-size').value),
+    analysis: {
+      min_word_length: Number(g('cfg-min-word-length').value),
+      top_n: Number(g('cfg-top-n').value),
+      filter_stopwords: g('cfg-filter-stopwords').checked,
+      keep_proper_nouns: g('cfg-keep-proper').checked,
+      filter_numbers: g('cfg-filter-numbers').checked,
+      filter_basic_words: g('cfg-filter-basic').checked,
+      basic_words_threshold: Number(g('cfg-basic-threshold').value),
+      weight_body: Number(g('cfg-weight-body').value),
+      weight_stem: Number(g('cfg-weight-stem').value),
+      weight_option: Number(g('cfg-weight-option').value),
+    },
+    ocr: {
+      engine: g('cfg-ocr-engine').value,
+      language: g('cfg-ocr-language').value.trim(),
+      pdf_dpi: Number(g('cfg-pdf-dpi').value),
+      pdf_ocr_threshold: Number(g('cfg-pdf-ocr-threshold').value),
+      page_segmentation_mode: Number(g('cfg-psm').value),
+      binary_threshold: Number(g('cfg-threshold').value),
+      upscale_factor: Number(g('cfg-upscale').value),
+      preprocess: g('cfg-preprocess').checked,
+      sharpen: g('cfg-sharpen').checked,
+      fallback_to_tesseract: g('cfg-fallback').checked,
+    },
+    mineru: {
+      enabled: g('cfg-mineru-enabled').checked,
+      api_base: g('cfg-mineru-api-base').value.trim(),
+      language: g('cfg-mineru-language').value.trim(),
+      page_range: g('cfg-mineru-page-range').value.trim() || null,
+      enable_table: g('cfg-mineru-table').checked,
+      enable_formula: g('cfg-mineru-formula').checked,
+      is_ocr: g('cfg-mineru-ocr').checked,
+      fallback_to_local: g('cfg-mineru-fallback').checked,
+      poll_timeout_sec: Number(g('cfg-mineru-timeout').value),
+      poll_interval_sec: Number(g('cfg-mineru-interval').value),
+    },
+  };
+  try {
+    const resp = await apiFetch('/admin/config', {method:'PUT', body: JSON.stringify(payload)});
+    const data = await resp.json();
+    if (!resp.ok) throw new Error(data.detail||'保存失败');
+    status.textContent = '✓ 已保存'; status.style.color = 'var(--success)';
+    setTimeout(() => status.textContent = '', 3000);
+  } catch(e) { status.textContent = '✗ ' + e.message; status.style.color = 'var(--danger)'; }
+}
+
+// ── OCR Test ──
+async function handleOcrFile(file) {
+  if (!file) return;
+  const status = document.getElementById('ocr-status');
+  const wrap = document.getElementById('ocr-result-wrap');
+  wrap.style.display = 'none';
+  status.innerHTML = `<div class="loading">正在提取文本：${esc(file.name)}…</div>`;
+  const fd = new FormData();
+  fd.append('file', file);
+  try {
+    const resp = await apiFetch('/admin/ocr-test', {method:'POST', body:fd});
+    const data = await resp.json();
+    if (!resp.ok) throw new Error(data.detail||'提取失败');
+    status.innerHTML = `<span class="chip ${data.used_ocr?'chip-warn':'chip-ok'}">${data.used_ocr?'已使用OCR':'直接提取（无OCR）'}</span>`;
+    document.getElementById('ocr-meta').textContent =
+      `文件：${file.name}  ·  字符数：${data.text_length}  ·  后端：${data.backend}`;
+    document.getElementById('ocr-result-text').textContent = data.text || '（无文本）';
+    wrap.style.display = '';
+  } catch(e) {
+    status.innerHTML = `<span style="color:var(--danger)">${e.message}</span>`;
+  }
+}
+
+function copyOcrText() {
+  const text = document.getElementById('ocr-result-text').textContent;
+  navigator.clipboard.writeText(text).then(() => alert('已复制到剪贴板'));
+}
+
+// ── System ──
+async function loadSystem() {
+  const el = document.getElementById('sys-info');
+  el.innerHTML = '<div class="loading">加载中…</div>';
+  try {
+    const resp = await apiFetch('/admin/system');
+    const data = await resp.json();
+    if (!resp.ok) throw new Error(data.detail||'加载失败');
+    const pkgs = data.packages || {};
+    el.innerHTML = `
+      <div class="info-grid">
+        <div>
+          <div class="info-row"><span class="info-key">Python 版本</span><span class="info-val" style="font-size:.78rem">${esc(data.python_version||'—')}</span></div>
+          <div class="info-row"><span class="info-key">spaCy 模型</span><span class="info-val">${data.spacy_model_loaded?'✓ en_core_web_sm':'✗ 未加载'}</span></div>
+          <div class="info-row"><span class="info-key">Anthropic Key</span><span class="info-val">${data.has_anthropic_key?'✓ 已配置':'✗ 未配置'}</span></div>
+          <div class="info-row"><span class="info-key">Merriam-Webster Key</span><span class="info-val">${data.has_mw_key?'✓ 已配置':'✗ 未配置'}</span></div>
+          <div class="info-row"><span class="info-key">AI 模型</span><span class="info-val" style="font-size:.8rem">${esc(data.ai_model||'—')}</span></div>
+          <div class="info-row"><span class="info-key">上传目录</span><span class="info-val" style="font-size:.78rem">${esc(data.upload_dir||'—')}</span></div>
+          <div class="info-row"><span class="info-key">数据库路径</span><span class="info-val" style="font-size:.78rem">${esc(data.db_path||'—')}</span></div>
+        </div>
+        <div>
+          <h4 style="font-size:.78rem;font-weight:800;color:var(--muted);text-transform:uppercase;letter-spacing:.04em;margin-bottom:.75rem">依赖包版本</h4>
+          ${Object.entries(pkgs).map(([k,v]) =>
+            `<div class="info-row"><span class="info-key">${esc(k)}</span><span class="info-val" style="font-family:monospace;font-size:.8rem">${esc(v)}</span></div>`
+          ).join('')}
+        </div>
+      </div>`;
+  } catch(e) { el.innerHTML = `<div style="color:var(--danger)">${e.message}</div>`; }
+}
+
+// Close modal on backdrop click
+document.querySelectorAll('.modal').forEach(m => {
+  m.addEventListener('click', e => { if (e.target === m) m.classList.remove('open'); });
+});
+
+// Init
+checkAuth();
+</script>
+</body>
+</html>

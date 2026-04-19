@@ -1,0 +1,45 @@
+# OS / editor
+.DS_Store
+Thumbs.db
+Desktop.ini
+.vscode/
+.idea/
+.claude/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.Python
+.venv/
+venv/
+env/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+
+# Local configuration and secrets
+.env
+.env.*
+!.env.example
+secret.key
+
+# Databases and local state
+*.db
+*.sqlite
+*.sqlite3
+
+# Runtime outputs
+uploads/
+results/
+data/uploads/
+data/exports/
+data/ocr_cache/
+data/files/
+
+# Logs
+*.log
+

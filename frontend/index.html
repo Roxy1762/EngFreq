@@ -1,0 +1,1934 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>英语试卷词频分析器</title>
+<link rel="stylesheet" href="/assets/app-enhancements.css" />
+<style>
+/* ─── Reset & Variables ─────────────────────────────────────────────── */
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+:root {
+  --primary:     #2563eb;
+  --primary-dk:  #1d4ed8;
+  --success:     #16a34a;
+  --warn:        #d97706;
+  --danger:      #dc2626;
+  --bg:          #f8fafc;
+  --card:        #ffffff;
+  --border:      #e2e8f0;
+  --text:        #1e293b;
+  --muted:       #64748b;
+  --radius:      10px;
+  --shadow:      0 1px 4px rgba(0,0,0,.08), 0 4px 16px rgba(0,0,0,.06);
+}
+
+body { font-family: "Segoe UI", system-ui, sans-serif; background: var(--bg); color: var(--text); min-height: 100vh; }
+
+/* ─── Layout ────────────────────────────────────────────────────────── */
+header { background: var(--primary); color: #fff; padding: 1rem 2rem; display: flex; align-items: center; gap: .75rem; }
+header h1 { font-size: 1.25rem; font-weight: 700; }
+header span.sub { font-size: .85rem; opacity: .8; }
+.header-left { flex: 1; display: flex; align-items: center; gap: .75rem; }
+
+main { max-width: 1200px; margin: 2rem auto; padding: 0 1.5rem; display: flex; flex-direction: column; gap: 1.5rem; }
+
+.card { background: var(--card); border: 1px solid var(--border); border-radius: var(--radius); box-shadow: var(--shadow); padding: 1.5rem; }
+.card-title { font-size: 1rem; font-weight: 700; margin-bottom: 1rem; display: flex; align-items: center; gap: .5rem; }
+
+/* ─── Upload zone ────────────────────────────────────────────────────── */
+#drop-zone {
+  border: 2px dashed var(--border); border-radius: var(--radius);
+  padding: 2.5rem; text-align: center; cursor: pointer;
+  transition: border-color .2s, background .2s;
+}
+#drop-zone:hover, #drop-zone.drag-over { border-color: var(--primary); background: #eff6ff; }
+#drop-zone .icon { font-size: 2.5rem; margin-bottom: .5rem; }
+#drop-zone p { color: var(--muted); font-size: .9rem; }
+#drop-zone strong { color: var(--primary); cursor: pointer; }
+#file-input { display: none; }
+#file-name { margin-top: .75rem; font-weight: 600; color: var(--success); min-height: 1.2em; }
+
+/* ─── Options grid ───────────────────────────────────────────────────── */
+.options-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(230px, 1fr)); gap: 1.25rem; }
+.opt-group label { display: block; font-size: .8rem; font-weight: 600; color: var(--muted); margin-bottom: .3rem; text-transform: uppercase; letter-spacing: .04em; }
+.opt-group input[type=number], .opt-group select {
+  width: 100%; padding: .45rem .65rem; border: 1px solid var(--border);
+  border-radius: 6px; font-size: .9rem; background: var(--bg);
+}
+.toggle-row { display: flex; flex-direction: column; gap: .5rem; }
+.toggle { display: flex; align-items: center; gap: .5rem; cursor: pointer; font-size: .9rem; }
+.toggle input[type=checkbox] { width: 1.1rem; height: 1.1rem; accent-color: var(--primary); cursor: pointer; }
+
+/* ─── Buttons ────────────────────────────────────────────────────────── */
+.btn {
+  display: inline-flex; align-items: center; gap: .4rem; padding: .6rem 1.4rem;
+  border-radius: 8px; border: none; font-size: .9rem; font-weight: 600; cursor: pointer;
+  transition: opacity .15s, transform .1s;
+}
+.btn:hover { opacity: .9; }
+.btn:active { transform: scale(.98); }
+.btn-primary { background: var(--primary); color: #fff; }
+.btn-success { background: var(--success); color: #fff; }
+.btn-danger  { background: var(--danger); color: #fff; }
+.btn-outline { background: transparent; border: 1.5px solid var(--border); color: var(--text); }
+.btn-sm { padding: .35rem .85rem; font-size: .82rem; }
+.btn:disabled { opacity: .4; cursor: not-allowed; }
+.btn-row { display: flex; flex-wrap: wrap; gap: .75rem; margin-top: 1rem; }
+
+/* ─── Progress ───────────────────────────────────────────────────────── */
+#progress-section { display: none; }
+.progress-bar-wrap { background: var(--border); border-radius: 99px; height: 10px; overflow: hidden; margin: .75rem 0; }
+.progress-bar-inner { height: 100%; background: var(--primary); transition: width .4s ease; border-radius: 99px; }
+#progress-msg { font-size: .9rem; color: var(--muted); }
+#status-badge { display: inline-block; padding: .15rem .6rem; border-radius: 4px; font-size: .78rem; font-weight: 700; text-transform: uppercase; margin-left: .5rem; }
+.badge-processing { background: #dbeafe; color: #1d4ed8; }
+.badge-done       { background: #dcfce7; color: #16a34a; }
+.badge-error      { background: #fee2e2; color: #dc2626; }
+
+/* ─── Code display ───────────────────────────────────────────────────── */
+#codes-section { display: none; }
+.code-box {
+  display: flex; align-items: center; gap: .75rem; flex-wrap: wrap;
+  background: #f1f5f9; border-radius: 8px; padding: .75rem 1rem; margin-bottom: .75rem;
+}
+.code-label { font-size: .8rem; font-weight: 700; color: var(--muted); text-transform: uppercase; min-width: 70px; }
+.code-value {
+  font-family: "Courier New", monospace; font-size: 1.25rem; font-weight: 800;
+  color: var(--primary); letter-spacing: .12em; flex: 1;
+}
+.code-info { font-size: .8rem; color: var(--muted); flex: 1; }
+.copy-btn {
+  padding: .3rem .8rem; border-radius: 6px; border: 1.5px solid var(--primary);
+  background: transparent; color: var(--primary); font-size: .8rem; font-weight: 700; cursor: pointer;
+  transition: background .15s, color .15s;
+}
+.copy-btn:hover { background: var(--primary); color: #fff; }
+
+/* ─── Results ─────────────────────────────────────────────────────────── */
+#results-section { display: none; }
+.tabs { display: flex; gap: 0; border-bottom: 2px solid var(--border); margin-bottom: 1.25rem; flex-wrap: wrap; }
+.tab-btn {
+  padding: .6rem 1.1rem; border: none; background: transparent; cursor: pointer;
+  font-size: .88rem; font-weight: 600; color: var(--muted); border-bottom: 3px solid transparent;
+  margin-bottom: -2px; transition: color .15s, border-color .15s;
+}
+.tab-btn.active { color: var(--primary); border-bottom-color: var(--primary); }
+.tab-panel { display: none; }
+.tab-panel.active { display: block; }
+
+.sort-row { display: flex; align-items: center; gap: .75rem; margin-bottom: .75rem; flex-wrap: wrap; }
+.sort-row label { font-size: .8rem; font-weight: 600; color: var(--muted); }
+.sort-row select { padding: .35rem .5rem; border: 1px solid var(--border); border-radius: 6px; font-size: .85rem; }
+.sort-row input[type=text] { padding: .35rem .65rem; border: 1px solid var(--border); border-radius: 6px; font-size: .85rem; width: 180px; }
+
+.tbl-wrap { overflow-x: auto; border-radius: 8px; border: 1px solid var(--border); }
+table { width: 100%; border-collapse: collapse; font-size: .85rem; }
+thead th { background: #f1f5f9; font-weight: 700; text-align: left; padding: .65rem .8rem; border-bottom: 2px solid var(--border); white-space: nowrap; }
+tbody tr:nth-child(even) { background: #f8fafc; }
+tbody td { padding: .5rem .8rem; border-bottom: 1px solid var(--border); vertical-align: top; max-width: 260px; word-break: break-word; }
+.num { text-align: right; }
+.score-cell { font-weight: 700; color: var(--primary); }
+.tag { display: inline-block; background: #dbeafe; color: #1d4ed8; border-radius: 3px; font-size: .72rem; padding: .1rem .35rem; margin: .1rem; }
+.tag-orange { background: #ffedd5; color: #c2410c; }
+
+.vocab-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 1rem; }
+.vocab-card { border: 1px solid var(--border); border-radius: 8px; padding: 1rem; background: var(--card); transition: box-shadow .2s; }
+.vocab-card:hover { box-shadow: 0 2px 12px rgba(0,0,0,.1); }
+.vocab-card .hw { font-size: 1.1rem; font-weight: 800; color: var(--primary); }
+.vocab-card .meta { font-size: .78rem; color: var(--muted); margin: .2rem 0 .5rem; }
+.vocab-card .cn  { font-size: 1rem; font-weight: 700; color: var(--text); margin-bottom: .3rem; }
+.vocab-card .en  { font-size: .85rem; color: var(--muted); margin-bottom: .4rem; }
+.vocab-card .ex  { font-size: .82rem; font-style: italic; border-left: 3px solid var(--border); padding-left: .5rem; color: #475569; margin-bottom: .4rem; }
+.vocab-card .note { font-size: .78rem; background: #fffbeb; border-radius: 4px; padding: .3rem .5rem; color: #92400e; }
+.vocab-card .counts { font-size: .75rem; color: var(--muted); margin-top: .5rem; display: flex; gap: .5rem; flex-wrap: wrap; }
+.counts .c-badge { background: #f1f5f9; border-radius: 3px; padding: .1rem .4rem; }
+
+.stats-row { display: flex; flex-wrap: wrap; gap: 1rem; padding: .75rem 0; border-bottom: 1px solid var(--border); margin-bottom: 1rem; }
+.stat-item { display: flex; flex-direction: column; align-items: center; min-width: 80px; }
+.stat-val { font-size: 1.4rem; font-weight: 800; color: var(--primary); }
+.stat-lbl { font-size: .72rem; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; }
+
+.empty { padding: 3rem; text-align: center; color: var(--muted); font-size: .9rem; }
+.error-box { background: #fee2e2; border: 1px solid #fca5a5; border-radius: 8px; padding: 1rem; color: #991b1b; font-size: .9rem; }
+
+/* ─── Auth overlay ───────────────────────────────────────────────────── */
+#auth-overlay {
+  position: fixed; inset: 0; background: rgba(15,23,42,.55);
+  display: flex; align-items: center; justify-content: center;
+  z-index: 1000; backdrop-filter: blur(4px);
+}
+.auth-card {
+  background: var(--card); border-radius: 16px; box-shadow: 0 8px 40px rgba(0,0,0,.2);
+  padding: 2.5rem; width: 100%; max-width: 420px;
+}
+.auth-logo { text-align: center; margin-bottom: 1.5rem; }
+.auth-logo .icon { font-size: 3rem; }
+.auth-logo h2 { font-size: 1.3rem; font-weight: 800; margin-top: .5rem; }
+.auth-logo p { color: var(--muted); font-size: .88rem; margin-top: .25rem; }
+
+.auth-tabs { display: flex; border-bottom: 2px solid var(--border); margin-bottom: 1.5rem; }
+.auth-tab {
+  flex: 1; text-align: center; padding: .6rem; border: none; background: transparent;
+  font-size: .95rem; font-weight: 700; color: var(--muted); cursor: pointer;
+  border-bottom: 3px solid transparent; margin-bottom: -2px; transition: color .15s, border-color .15s;
+}
+.auth-tab.active { color: var(--primary); border-bottom-color: var(--primary); }
+
+.form-group { margin-bottom: 1rem; }
+.form-group label { display: block; font-size: .82rem; font-weight: 700; color: var(--muted); margin-bottom: .35rem; text-transform: uppercase; letter-spacing: .04em; }
+.form-group input {
+  width: 100%; padding: .6rem .9rem; border: 1.5px solid var(--border);
+  border-radius: 8px; font-size: .95rem; outline: none; transition: border-color .15s;
+}
+.form-group input:focus { border-color: var(--primary); }
+
+.auth-error { color: var(--danger); font-size: .85rem; margin-top: .5rem; min-height: 1.2em; }
+.auth-divider { border: none; border-top: 1px solid var(--border); margin: 1.25rem 0; }
+
+.code-lookup { margin-top: 1rem; }
+.code-lookup p { font-size: .83rem; color: var(--muted); margin-bottom: .5rem; text-align: center; }
+.code-input-row { display: flex; gap: .5rem; }
+.code-input-row input {
+  flex: 1; padding: .5rem .75rem; border: 1.5px solid var(--border);
+  border-radius: 8px; font-size: .9rem; outline: none; font-family: "Courier New", monospace;
+  text-transform: uppercase; letter-spacing: .08em;
+}
+.code-input-row input:focus { border-color: var(--primary); }
+
+/* ─── User bar in header ─────────────────────────────────────────────── */
+#user-bar { display: flex; align-items: center; gap: .6rem; flex-wrap: wrap; }
+.user-name { font-size: .88rem; font-weight: 700; opacity: .95; }
+.header-btn {
+  padding: .35rem .9rem; border-radius: 6px; border: 1.5px solid rgba(255,255,255,.5);
+  background: transparent; color: #fff; font-size: .82rem; font-weight: 600; cursor: pointer;
+  transition: background .15s;
+}
+.header-btn:hover { background: rgba(255,255,255,.2); }
+.header-btn.danger { border-color: rgba(255,100,100,.6); }
+.header-btn.danger:hover { background: rgba(220,38,38,.4); }
+
+/* ─── Modal ──────────────────────────────────────────────────────────── */
+.modal-overlay {
+  position: fixed; inset: 0; background: rgba(15,23,42,.5);
+  display: flex; align-items: center; justify-content: center;
+  z-index: 900; backdrop-filter: blur(3px);
+}
+.modal-card {
+  background: var(--card); border-radius: 14px; box-shadow: 0 8px 40px rgba(0,0,0,.18);
+  padding: 2rem; width: 100%; max-width: 700px; max-height: 85vh;
+  overflow-y: auto; position: relative;
+}
+.modal-card.wide { max-width: 960px; }
+.modal-title { font-size: 1.15rem; font-weight: 800; margin-bottom: 1.25rem; display: flex; align-items: center; justify-content: space-between; }
+.modal-close { font-size: 1.4rem; cursor: pointer; color: var(--muted); line-height: 1; border: none; background: none; }
+.modal-close:hover { color: var(--danger); }
+
+/* Admin tabs */
+.admin-tabs { display: flex; border-bottom: 2px solid var(--border); margin-bottom: 1.25rem; }
+.admin-tab { padding: .55rem 1rem; border: none; background: transparent; font-size: .88rem; font-weight: 700; color: var(--muted); cursor: pointer; border-bottom: 3px solid transparent; margin-bottom: -2px; }
+.admin-tab.active { color: var(--primary); border-bottom-color: var(--primary); }
+
+/* My codes list */
+.code-list-item {
+  display: flex; align-items: center; gap: .75rem; padding: .6rem 0;
+  border-bottom: 1px solid var(--border); flex-wrap: wrap;
+}
+.code-list-item:last-child { border-bottom: none; }
+.cli-code { font-family: "Courier New", monospace; font-weight: 800; font-size: 1.05rem; color: var(--primary); letter-spacing: .1em; }
+.cli-file { font-size: .85rem; color: var(--text); flex: 1; min-width: 120px; }
+.cli-date { font-size: .77rem; color: var(--muted); white-space: nowrap; }
+
+/* Admin user rows */
+.user-row { display: flex; align-items: center; gap: .75rem; padding: .65rem; border-radius: 8px; flex-wrap: wrap; }
+.user-row:nth-child(odd) { background: #f8fafc; }
+.user-badge { display: inline-block; padding: .15rem .5rem; border-radius: 4px; font-size: .72rem; font-weight: 700; background: #fef3c7; color: #92400e; }
+.user-badge.admin { background: #dbeafe; color: #1e40af; }
+.reset-form { display: none; align-items: center; gap: .5rem; margin-top: .5rem; width: 100%; }
+.reset-form input { padding: .4rem .7rem; border: 1.5px solid var(--border); border-radius: 6px; font-size: .85rem; flex: 1; outline: none; }
+.reset-form input:focus { border-color: var(--primary); }
+
+/* Share view banner */
+.share-banner {
+  background: linear-gradient(135deg, #1e40af, #2563eb);
+  color: #fff; border-radius: var(--radius); padding: 1.25rem 1.5rem;
+  display: flex; align-items: center; gap: 1rem; flex-wrap: wrap;
+}
+.share-banner .sb-code { font-family: "Courier New", monospace; font-size: 1.4rem; font-weight: 800; letter-spacing: .1em; background: rgba(255,255,255,.2); padding: .25rem .75rem; border-radius: 6px; }
+.share-banner .sb-info { flex: 1; }
+.share-banner .sb-info p { font-size: .88rem; opacity: .85; margin-top: .2rem; }
+
+footer { text-align: center; padding: 2rem; color: var(--muted); font-size: .8rem; }
+
+/* ─── Word Level Badges ──────────────────────────────────────────────── */
+.level-badge {
+  display: inline-block; padding: .1rem .45rem; border-radius: 4px;
+  font-size: .7rem; font-weight: 700; letter-spacing: .04em;
+  vertical-align: middle; margin-left: .3rem;
+}
+.level-基础   { background: #dcfce7; color: #15803d; }
+.level-高考   { background: #dbeafe; color: #1d4ed8; }
+.level-四六级 { background: #fef9c3; color: #a16207; }
+.level-超纲   { background: #fee2e2; color: #b91c1c; }
+
+/* ─── Vocab Card Selection ───────────────────────────────────────────── */
+.vocab-card { position: relative; }
+.vocab-card.deselected { opacity: .4; }
+.vocab-card .sel-cb {
+  position: absolute; top: .6rem; right: .6rem;
+  width: 1.15rem; height: 1.15rem; cursor: pointer; accent-color: var(--primary);
+}
+.vocab-card .hw-row { display: flex; align-items: center; gap: .3rem; flex-wrap: wrap; }
+
+/* ─── Vocab toolbar ──────────────────────────────────────────────────── */
+.vocab-toolbar {
+  display: flex; align-items: center; gap: .6rem; flex-wrap: wrap;
+  margin-bottom: 1rem; padding: .7rem 1rem;
+  background: #f8fafc; border-radius: 8px; border: 1px solid var(--border);
+}
+.vocab-toolbar span { font-size: .82rem; color: var(--muted); }
+.sel-count { font-weight: 700; color: var(--primary); }
+
+/* ─── Multi-exam panel ───────────────────────────────────────────────── */
+#multi-exam-list { max-height: 320px; overflow-y: auto; }
+.exam-check-item {
+  display: flex; align-items: center; gap: .75rem; padding: .5rem .75rem;
+  border-radius: 6px; cursor: pointer;
+}
+.exam-check-item:hover { background: #f1f5f9; }
+.exam-check-item input[type=checkbox] { width: 1rem; height: 1rem; accent-color: var(--primary); }
+.exam-check-item .eci-code { font-family: monospace; font-weight: 700; color: var(--primary); font-size: .95rem; min-width: 90px; }
+.exam-check-item .eci-file { flex: 1; font-size: .85rem; }
+.exam-check-item .eci-badge { background: #f0fdf4; color: #15803d; border-radius: 4px; padding: .1rem .4rem; font-size: .72rem; }
+
+/* ─── Profile modal ──────────────────────────────────────────────────── */
+.profile-field { margin-bottom: 1rem; }
+.profile-field label { display: block; font-size: .78rem; font-weight: 700; color: var(--muted); margin-bottom: .3rem; text-transform: uppercase; }
+.profile-field input { width: 100%; padding: .5rem .8rem; border: 1.5px solid var(--border); border-radius: 8px; font-size: .9rem; outline: none; transition: border-color .15s; }
+.profile-field input:focus { border-color: var(--primary); }
+.profile-section-title { font-size: .85rem; font-weight: 800; color: var(--muted); margin: 1.25rem 0 .75rem; padding-bottom: .4rem; border-bottom: 1px solid var(--border); text-transform: uppercase; letter-spacing: .04em; }
+
+/* ─── Combined exam banner ───────────────────────────────────────────── */
+.combined-banner {
+  background: linear-gradient(135deg, #7c3aed, #6366f1);
+  color: #fff; border-radius: 8px; padding: .75rem 1rem;
+  font-size: .85rem; margin-bottom: 1rem; display: flex; align-items: center; gap: .5rem;
+}
+
+/* ─── Source exam badges ─────────────────────────────────────────────── */
+.src-badge { display: inline-block; background: rgba(255,255,255,.25); border-radius: 4px; padding: .1rem .4rem; font-size: .75rem; margin: .1rem; font-family: monospace; }
+</style>
+</head>
+<body>
+
+<!-- ══ AUTH OVERLAY ════════════════════════════════════════════════════════ -->
+<div id="auth-overlay">
+  <div class="auth-card">
+    <div class="auth-logo">
+      <div class="icon">📚</div>
+      <h2>英语试卷词频分析器</h2>
+      <p>请登录或注册以使用完整功能</p>
+    </div>
+
+    <div class="auth-tabs">
+      <button class="auth-tab active" onclick="switchAuthTab('login')">登录</button>
+      <button class="auth-tab" onclick="switchAuthTab('register')">注册</button>
+    </div>
+
+    <!-- Login -->
+    <div id="auth-login-form">
+      <div class="form-group">
+        <label>用户名</label>
+        <input type="text" id="login-user" placeholder="请输入用户名" onkeydown="if(event.key==='Enter')doLogin()" />
+      </div>
+      <div class="form-group">
+        <label>密码</label>
+        <input type="password" id="login-pass" placeholder="请输入密码" onkeydown="if(event.key==='Enter')doLogin()" />
+      </div>
+      <button class="btn btn-primary" onclick="doLogin()" style="width:100%">登 录</button>
+      <div class="auth-error" id="login-err"></div>
+    </div>
+
+    <!-- Register -->
+    <div id="auth-register-form" style="display:none">
+      <div class="form-group">
+        <label>用户名（字母/数字/下划线，2-32位）</label>
+        <input type="text" id="reg-user" placeholder="请设置用户名" onkeydown="if(event.key==='Enter')doRegister()" />
+      </div>
+      <div class="form-group">
+        <label>密码（至少 6 位）</label>
+        <input type="password" id="reg-pass" placeholder="请设置密码" onkeydown="if(event.key==='Enter')doRegister()" />
+      </div>
+      <button class="btn btn-primary" onclick="doRegister()" style="width:100%">注 册</button>
+      <div class="auth-error" id="reg-err"></div>
+    </div>
+
+    <hr class="auth-divider" />
+
+    <!-- View by code without login -->
+    <div class="code-lookup">
+      <p>已有试卷码 / 词典码？无需登录即可查看</p>
+      <div class="code-input-row">
+        <input type="text" id="auth-code-input" placeholder="输入试卷码 / 词典码" maxlength="12" />
+        <button class="btn btn-outline btn-sm" onclick="viewCodeGuest()">查看</button>
+      </div>
+      <div class="auth-error" id="code-err"></div>
+    </div>
+  </div>
+</div>
+
+<!-- ══ MAIN APP ═════════════════════════════════════════════════════════════ -->
+<div id="main-app" style="display:none">
+
+<header>
+  <div class="header-left">
+    <span style="font-size:1.5rem">📚</span>
+    <div>
+      <h1>英语试卷词频分析器</h1>
+      <span class="sub">上传试卷 → 结构识别 → 词频统计 → AI词汇表</span>
+    </div>
+  </div>
+  <div id="user-bar">
+    <span class="user-name" id="username-display"></span>
+    <button class="header-btn" onclick="showMyCodes()">我的试卷码</button>
+    <button class="header-btn" onclick="showMultiExamModal()">多试卷分析</button>
+    <button class="header-btn" onclick="showProfile()">个人设置</button>
+    <button class="header-btn" id="admin-btn" style="display:none" onclick="window.open('/manage','_blank')">管理中心</button>
+    <button class="header-btn danger" onclick="doLogout()">退出</button>
+  </div>
+</header>
+
+<main>
+
+<!-- ① Upload ──────────────────────────────────────────────────────────────── -->
+<div class="card">
+  <div class="card-title">① 上传试卷
+    <span style="font-size:.8rem;font-weight:400;color:var(--muted);margin-left:.5rem">支持同时上传多个文件进行合并分析</span>
+  </div>
+  <div id="drop-zone">
+    <div class="icon">📄</div>
+    <p>将文件拖放到此处，或 <strong onclick="document.getElementById('file-input').click()">点击选择文件</strong></p>
+    <p style="margin-top:.3rem">支持 PDF · DOCX · TXT · PNG · JPG（图片将自动OCR）</p>
+    <div id="file-name"></div>
+    <div id="multi-file-list" style="margin-top:.5rem;display:none"></div>
+  </div>
+  <input type="file" id="file-input" accept=".pdf,.docx,.txt,.png,.jpg,.jpeg,.bmp,.tiff" multiple />
+</div>
+
+<!-- ② Options ─────────────────────────────────────────────────────────────── -->
+<div class="card">
+  <div class="card-title">② 分析选项</div>
+  <div class="options-grid">
+    <div class="opt-group">
+      <label>最短词长</label>
+      <input type="number" id="min_word_length" value="2" min="1" max="8" />
+    </div>
+    <div class="opt-group">
+      <label>词汇表数量 (Top N)</label>
+      <input type="number" id="top_n" value="50" min="10" max="300" />
+    </div>
+    <div class="opt-group">
+      <label>词汇提供源</label>
+      <select id="vocab_provider">
+        <option value="">— 使用服务端默认 —</option>
+        <option value="claude">Claude AI（中英对照）</option>
+        <option value="deepseek">DeepSeek（中英对照）</option>
+        <option value="openai">OpenAI 兼容</option>
+        <option value="free_dict">Free Dictionary（免费）</option>
+        <option value="merriam_webster">Merriam-Webster</option>
+        <option value="youdao">有道词典</option>
+        <option value="ecdict">ECDICT 离线词典</option>
+      </select>
+    </div>
+    <div class="opt-group toggle-row">
+      <label>过滤选项</label>
+      <label class="toggle"><input type="checkbox" id="filter_stopwords" /> 过滤停用词</label>
+      <label class="toggle"><input type="checkbox" id="keep_proper_nouns" checked /> 保留专有名词</label>
+      <label class="toggle"><input type="checkbox" id="filter_numbers" checked /> 过滤数字</label>
+    </div>
+    <div class="opt-group">
+      <label>正文权重 (body)</label>
+      <input type="number" id="weight_body" value="1.0" min="0" max="10" step="0.1" />
+    </div>
+    <div class="opt-group">
+      <label>题干权重 (stem)</label>
+      <input type="number" id="weight_stem" value="1.5" min="0" max="10" step="0.1" />
+    </div>
+    <div class="opt-group">
+      <label>选项权重 (option)</label>
+      <input type="number" id="weight_option" value="3.0" min="0" max="10" step="0.1" />
+    </div>
+    <div class="opt-group">
+      <label>立即生成词汇表</label>
+      <label class="toggle"><input type="checkbox" id="generate_vocab" /> 分析完成后自动生成</label>
+    </div>
+  </div>
+  <div class="btn-row">
+    <button class="btn btn-primary" id="analyze-btn" disabled onclick="startAnalysis()">▶ 开始分析</button>
+  </div>
+</div>
+
+<!-- ③ Progress ────────────────────────────────────────────────────────────── -->
+<div class="card" id="progress-section">
+  <div class="card-title">
+    ③ 处理状态
+    <span id="status-badge" class="badge-processing">处理中</span>
+  </div>
+  <div class="progress-bar-wrap">
+    <div class="progress-bar-inner" id="progress-bar" style="width:0%"></div>
+  </div>
+  <div id="progress-msg">请稍候…</div>
+</div>
+
+<!-- ④ Codes display ───────────────────────────────────────────────────────── -->
+<div class="card" id="codes-section">
+  <div class="card-title">④ 试卷码 / 词典码</div>
+  <p style="font-size:.88rem;color:var(--muted);margin-bottom:1rem">
+    将以下码分享给他人，任何人输入码即可查看此试卷的分析结果，无需登录。
+  </p>
+  <div id="exam-code-box" style="display:none">
+    <div class="code-box">
+      <span class="code-label">试卷码</span>
+      <span class="code-value" id="exam-code-val"></span>
+      <span class="code-info">分享此码可让他人查看完整词频分析</span>
+      <button class="copy-btn" onclick="copyCode('exam-code-val')">复制</button>
+    </div>
+  </div>
+  <div id="dict-code-box" style="display:none">
+    <div class="code-box">
+      <span class="code-label">词典码</span>
+      <span class="code-value" id="dict-code-val"></span>
+      <span class="code-info">分享此码可让他人查看词汇表</span>
+      <button class="copy-btn" onclick="copyCode('dict-code-val')">复制</button>
+    </div>
+  </div>
+  <div id="dict-code-pending" style="color:var(--muted);font-size:.85rem;display:none">
+    词典码将在词汇表生成后出现。
+  </div>
+</div>
+
+<!-- ⑤ Results ─────────────────────────────────────────────────────────────── -->
+<div class="card" id="results-section">
+  <div class="card-title">⑤ 分析结果</div>
+
+  <div class="stats-row" id="stats-row"></div>
+
+  <div class="btn-row" style="margin-bottom:1rem">
+    <button class="btn btn-outline" onclick="exportFile('csv')">⬇ 导出 CSV</button>
+    <button class="btn btn-outline" onclick="exportFile('xlsx')">⬇ 导出 XLSX</button>
+    <button class="btn btn-success" id="vocab-btn" onclick="generateVocab()">✨ 生成词汇表</button>
+    <select id="vocab-provider-select" style="padding:.5rem;border:1px solid var(--border);border-radius:6px;font-size:.85rem">
+      <option value="">默认提供源</option>
+      <option value="claude">Claude AI（中英对照）</option>
+      <option value="deepseek">DeepSeek（中英对照）</option>
+      <option value="openai">OpenAI 兼容</option>
+      <option value="free_dict">Free Dictionary</option>
+      <option value="merriam_webster">Merriam-Webster</option>
+      <option value="youdao">有道词典</option>
+      <option value="ecdict">ECDICT 离线</option>
+    </select>
+    <input type="number" id="vocab-top-n" value="50" min="5" max="300"
+           style="width:80px;padding:.5rem;border:1px solid var(--border);border-radius:6px;font-size:.85rem" title="词汇表数量" />
+  </div>
+
+  <div class="tabs">
+    <button class="tab-btn active" onclick="switchTab('tab-raw',this)">原词频</button>
+    <button class="tab-btn" onclick="switchTab('tab-lemma',this)">Lemma 聚合</button>
+    <button class="tab-btn" onclick="switchTab('tab-family',this)">词族聚合</button>
+    <button class="tab-btn" onclick="switchTab('tab-vocab',this)">词汇表</button>
+  </div>
+
+  <div id="tab-raw" class="tab-panel active">
+    <div class="sort-row">
+      <label>排序</label>
+      <select onchange="renderRaw(this.value)">
+        <option value="score">综合得分</option><option value="total">总频次</option><option value="option">选项频次</option>
+      </select>
+      <label>搜索</label>
+      <input type="text" id="raw-search" placeholder="过滤词语…" oninput="renderRaw()" />
+    </div>
+    <div class="tbl-wrap">
+      <table>
+        <thead><tr>
+          <th>#</th><th>表面形式</th><th>Lemma</th><th>词性</th><th>词族ID</th>
+          <th class="num">正文</th><th class="num">题干</th><th class="num">选项</th><th class="num">总计</th><th class="num">得分</th>
+        </tr></thead>
+        <tbody id="raw-tbody"></tbody>
+      </table>
+    </div>
+  </div>
+
+  <div id="tab-lemma" class="tab-panel">
+    <div class="sort-row">
+      <label>排序</label>
+      <select onchange="renderLemma(this.value)">
+        <option value="score">综合得分</option><option value="total">总频次</option><option value="option">选项频次</option>
+      </select>
+      <label>搜索</label>
+      <input type="text" id="lemma-search" placeholder="过滤…" oninput="renderLemma()" />
+    </div>
+    <div class="tbl-wrap">
+      <table>
+        <thead><tr>
+          <th>#</th><th>Lemma</th><th>词性</th><th>词族ID</th><th>表面形式</th>
+          <th class="num">正文</th><th class="num">题干</th><th class="num">选项</th><th class="num">总计</th><th class="num">得分</th>
+        </tr></thead>
+        <tbody id="lemma-tbody"></tbody>
+      </table>
+    </div>
+  </div>
+
+  <div id="tab-family" class="tab-panel">
+    <div class="sort-row">
+      <label>排序</label>
+      <select onchange="renderFamily(this.value)">
+        <option value="score">综合得分</option><option value="total">总频次</option><option value="option">选项频次</option>
+      </select>
+    </div>
+    <div class="tbl-wrap">
+      <table>
+        <thead><tr>
+          <th>#</th><th>词族根</th><th>成员 (lemma)</th>
+          <th class="num">正文</th><th class="num">题干</th><th class="num">选项</th><th class="num">总计</th><th class="num">得分</th>
+        </tr></thead>
+        <tbody id="family-tbody"></tbody>
+      </table>
+    </div>
+  </div>
+
+  <div id="tab-vocab" class="tab-panel">
+    <div id="vocab-empty" class="empty">请点击 "✨ 生成词汇表" 按钮来调用 AI / 词典生成</div>
+    <div id="vocab-toolbar" class="vocab-toolbar" style="display:none">
+      <span>筛选：</span>
+      <button class="btn btn-outline btn-sm" onclick="filterVocabLevel('all')">全部</button>
+      <button class="btn btn-outline btn-sm" onclick="filterVocabLevel('高考')" style="border-color:#1d4ed8;color:#1d4ed8">高考</button>
+      <button class="btn btn-outline btn-sm" onclick="filterVocabLevel('超纲')" style="border-color:#b91c1c;color:#b91c1c">超纲</button>
+      <button class="btn btn-outline btn-sm" onclick="filterVocabLevel('基础')" style="border-color:#15803d;color:#15803d">基础</button>
+      <span style="margin-left:.5rem">选择：</span>
+      <button class="btn btn-outline btn-sm" onclick="selectAllVocab(true)">全选</button>
+      <button class="btn btn-outline btn-sm" onclick="selectAllVocab(false)">取消全选</button>
+      <button class="btn btn-outline btn-sm" onclick="selectByLevel('高考')" style="border-color:#1d4ed8;color:#1d4ed8">选高考词</button>
+      <button class="btn btn-success btn-sm" onclick="aiSelectVocab()">🤖 AI智能选词</button>
+      <span class="sel-count" id="sel-count"></span>
+      <div style="flex:1"></div>
+      <button class="btn btn-outline btn-sm" onclick="exportSelectedVocab('csv')">⬇ 导出选中(CSV)</button>
+      <button class="btn btn-outline btn-sm" onclick="exportSelectedVocab('xlsx')">⬇ 导出选中(XLSX)</button>
+    </div>
+    <div class="vocab-grid" id="vocab-grid"></div>
+  </div>
+</div>
+
+</main>
+<footer>English Exam Word Analyzer · Powered by FastAPI + spaCy + Claude</footer>
+
+</div><!-- end #main-app -->
+
+<!-- ══ MODAL: Profile ════════════════════════════════════════════════════════ -->
+<div class="modal-overlay" id="profile-modal" style="display:none" onclick="if(event.target===this)closeModal('profile-modal')">
+  <div class="modal-card" style="max-width:480px">
+    <div class="modal-title">
+      个人设置
+      <button class="modal-close" onclick="closeModal('profile-modal')">×</button>
+    </div>
+    <div class="profile-section-title">基本信息</div>
+    <div class="profile-field">
+      <label>用户名</label>
+      <input type="text" id="profile-username" disabled style="background:#f1f5f9;color:var(--muted)" />
+    </div>
+    <div class="profile-field">
+      <label>显示名称</label>
+      <input type="text" id="profile-display-name" placeholder="可选，用于显示" />
+    </div>
+    <div class="profile-field">
+      <label>邮箱</label>
+      <input type="email" id="profile-email" placeholder="可选" />
+    </div>
+    <div class="profile-field">
+      <label>常用词汇提供源</label>
+      <select id="profile-provider" style="width:100%;padding:.5rem .8rem;border:1.5px solid var(--border);border-radius:8px;font-size:.9rem">
+        <option value="">— 使用系统默认 —</option>
+        <option value="claude">Claude AI</option>
+        <option value="deepseek">DeepSeek</option>
+        <option value="openai">OpenAI 兼容</option>
+        <option value="free_dict">Free Dictionary</option>
+        <option value="youdao">有道词典</option>
+        <option value="ecdict">ECDICT 离线</option>
+      </select>
+    </div>
+    <button class="btn btn-primary" onclick="saveProfile()" style="width:100%">保存信息</button>
+    <div id="profile-msg" style="font-size:.85rem;margin-top:.5rem;min-height:1.2em"></div>
+    <div class="profile-section-title">修改密码</div>
+    <div class="profile-field">
+      <label>当前密码</label>
+      <input type="password" id="pw-old" placeholder="请输入当前密码" />
+    </div>
+    <div class="profile-field">
+      <label>新密码（至少6位）</label>
+      <input type="password" id="pw-new" placeholder="请输入新密码" />
+    </div>
+    <div class="profile-field">
+      <label>确认新密码</label>
+      <input type="password" id="pw-confirm" placeholder="再次输入新密码" />
+    </div>
+    <button class="btn btn-danger btn-sm" onclick="changePassword()">修改密码</button>
+    <div id="pw-msg" style="font-size:.85rem;margin-top:.5rem;min-height:1.2em"></div>
+  </div>
+</div>
+
+<!-- ══ MODAL: Multi-Exam ══════════════════════════════════════════════════════ -->
+<div class="modal-overlay" id="multi-exam-modal" style="display:none" onclick="if(event.target===this)closeModal('multi-exam-modal')">
+  <div class="modal-card" style="max-width:640px">
+    <div class="modal-title">
+      多试卷合并分析
+      <button class="modal-close" onclick="closeModal('multi-exam-modal')">×</button>
+    </div>
+    <p style="font-size:.88rem;color:var(--muted);margin-bottom:1rem">
+      选择多份已分析的试卷，系统将合并所有词频数据，生成综合词汇分析报告，方便跨卷备考。
+    </p>
+    <div id="multi-exam-list"><div class="empty">加载中…</div></div>
+    <div style="margin-top:1rem;display:flex;align-items:center;gap:.75rem;flex-wrap:wrap">
+      <div class="opt-group" style="flex:1;min-width:120px">
+        <label style="font-size:.78rem;font-weight:700;color:var(--muted);display:block;margin-bottom:.3rem">词汇提供源</label>
+        <select id="multi-provider" style="width:100%;padding:.45rem;border:1px solid var(--border);border-radius:6px;font-size:.85rem">
+          <option value="">默认</option>
+          <option value="claude">Claude AI</option>
+          <option value="deepseek">DeepSeek</option>
+          <option value="openai">OpenAI</option>
+          <option value="free_dict">Free Dictionary</option>
+          <option value="youdao">有道词典</option>
+        </select>
+      </div>
+      <div class="opt-group" style="min-width:100px">
+        <label style="font-size:.78rem;font-weight:700;color:var(--muted);display:block;margin-bottom:.3rem">词汇数量</label>
+        <input type="number" id="multi-top-n" value="60" min="10" max="200" style="width:80px;padding:.45rem;border:1px solid var(--border);border-radius:6px;font-size:.85rem" />
+      </div>
+      <label class="toggle" style="margin-top:1.2rem">
+        <input type="checkbox" id="multi-gen-vocab" checked /> 自动生成词汇表
+      </label>
+    </div>
+    <div id="multi-exam-selected-info" style="font-size:.85rem;color:var(--muted);margin-top:.5rem"></div>
+    <div class="btn-row">
+      <button class="btn btn-primary" onclick="runMultiExamCombine()">🔗 合并分析</button>
+      <button class="btn btn-outline" onclick="closeModal('multi-exam-modal')">取消</button>
+    </div>
+    <div id="multi-exam-msg" style="font-size:.85rem;margin-top:.75rem;min-height:1.2em"></div>
+  </div>
+</div>
+
+<!-- ══ MODAL: My Codes ══════════════════════════════════════════════════════ -->
+<div class="modal-overlay" id="my-codes-modal" style="display:none" onclick="if(event.target===this)closeModal('my-codes-modal')">
+  <div class="modal-card">
+    <div class="modal-title">
+      我的试卷码 / 词典码
+      <button class="modal-close" onclick="closeModal('my-codes-modal')">×</button>
+    </div>
+    <div id="my-codes-content"><div class="empty">加载中…</div></div>
+  </div>
+</div>
+
+<!-- ══ MODAL: Admin Panel ═══════════════════════════════════════════════════ -->
+<div class="modal-overlay" id="admin-modal" style="display:none" onclick="if(event.target===this)closeModal('admin-modal')">
+  <div class="modal-card wide">
+    <div class="modal-title">
+      管理后台
+      <button class="modal-close" onclick="closeModal('admin-modal')">×</button>
+    </div>
+    <div class="admin-tabs">
+      <button class="admin-tab active" onclick="switchAdminTab('users', this)">用户管理</button>
+      <button class="admin-tab" onclick="switchAdminTab('codes', this)">全部试卷码</button>
+    </div>
+    <div id="admin-users-panel">
+      <div class="empty">加载中…</div>
+    </div>
+    <div id="admin-codes-panel" style="display:none">
+      <div class="empty">加载中…</div>
+    </div>
+  </div>
+</div>
+
+<!-- ══ SHARED VIEW (no-auth result display) ════════════════════════════════ -->
+<div id="share-view" style="display:none">
+  <header>
+    <div class="header-left">
+      <span style="font-size:1.5rem">📚</span>
+      <div>
+        <h1>英语试卷词频分析器</h1>
+        <span class="sub">共享查看模式</span>
+      </div>
+    </div>
+    <div>
+      <button class="header-btn" onclick="showAuthOverlay()">登录 / 注册</button>
+    </div>
+  </header>
+  <main>
+    <div id="share-banner-wrap"></div>
+
+    <!-- Vocab-only view (dict code) -->
+    <div class="card" id="share-vocab-only" style="display:none">
+      <div class="card-title">词汇表</div>
+      <div class="vocab-grid" id="share-vocab-grid"></div>
+    </div>
+
+    <!-- Full result view (exam code) -->
+    <div class="card" id="share-results-card" style="display:none">
+      <div class="card-title">分析结果</div>
+      <div class="stats-row" id="share-stats-row"></div>
+      <div class="tabs">
+        <button class="tab-btn active" onclick="switchTab('s-tab-raw',this)">原词频</button>
+        <button class="tab-btn" onclick="switchTab('s-tab-lemma',this)">Lemma 聚合</button>
+        <button class="tab-btn" onclick="switchTab('s-tab-family',this)">词族聚合</button>
+        <button class="tab-btn" onclick="switchTab('s-tab-vocab',this)">词汇表</button>
+      </div>
+      <div id="s-tab-raw" class="tab-panel active">
+        <div class="tbl-wrap"><table>
+          <thead><tr>
+            <th>#</th><th>表面形式</th><th>Lemma</th><th>词性</th>
+            <th class="num">正文</th><th class="num">题干</th><th class="num">选项</th><th class="num">总计</th><th class="num">得分</th>
+          </tr></thead>
+          <tbody id="s-raw-tbody"></tbody>
+        </table></div>
+      </div>
+      <div id="s-tab-lemma" class="tab-panel">
+        <div class="tbl-wrap"><table>
+          <thead><tr>
+            <th>#</th><th>Lemma</th><th>词性</th><th>表面形式</th>
+            <th class="num">正文</th><th class="num">题干</th><th class="num">选项</th><th class="num">总计</th><th class="num">得分</th>
+          </tr></thead>
+          <tbody id="s-lemma-tbody"></tbody>
+        </table></div>
+      </div>
+      <div id="s-tab-family" class="tab-panel">
+        <div class="tbl-wrap"><table>
+          <thead><tr>
+            <th>#</th><th>词族根</th><th>成员</th>
+            <th class="num">正文</th><th class="num">题干</th><th class="num">选项</th><th class="num">总计</th><th class="num">得分</th>
+          </tr></thead>
+          <tbody id="s-family-tbody"></tbody>
+        </table></div>
+      </div>
+      <div id="s-tab-vocab" class="tab-panel">
+        <div id="s-vocab-empty" class="empty" style="display:none">此试卷暂无词汇表</div>
+        <div class="vocab-grid" id="s-vocab-grid"></div>
+      </div>
+    </div>
+  </main>
+  <footer>English Exam Word Analyzer · Powered by FastAPI + spaCy + Claude</footer>
+</div>
+
+<script>
+// ════════════════════════════════════════════════════════════════════════
+// State
+// ════════════════════════════════════════════════════════════════════════
+let AUTH_TOKEN  = localStorage.getItem('auth_token') || '';
+let CURRENT_USER = null;
+
+let currentFile   = null;
+let currentFiles  = [];
+let currentTaskId = null;
+let pollTimer     = null;
+let resultData    = null;
+let rawSortKey    = 'score';
+let lemmaSortKey  = 'score';
+let familySortKey = 'score';
+
+// ════════════════════════════════════════════════════════════════════════
+// App init
+// ════════════════════════════════════════════════════════════════════════
+(async function init() {
+  // Check URL for share code
+  const params = new URLSearchParams(location.search);
+  const examParam = params.get('exam');
+  const dictParam = params.get('dict');
+
+  if (examParam) { await loadSharedExam(examParam); return; }
+  if (dictParam) { await loadSharedDict(dictParam); return; }
+
+  // Check if already logged in
+  if (AUTH_TOKEN) {
+    try {
+      const resp = await apiFetch('/auth/me');
+      if (resp.ok) {
+        CURRENT_USER = await resp.json();
+        showApp();
+        return;
+      }
+    } catch {}
+    // Token invalid
+    AUTH_TOKEN = '';
+    localStorage.removeItem('auth_token');
+  }
+  showAuthOverlay();
+})();
+
+window.showApp = function () {
+  document.getElementById('auth-overlay').style.display = 'none';
+  document.getElementById('share-view').style.display = 'none';
+  document.getElementById('main-app').style.display = '';
+  document.getElementById('username-display').textContent = '👤 ' + CURRENT_USER.username;
+  if (CURRENT_USER.is_admin) {
+    document.getElementById('admin-btn').style.display = '';
+  }
+};
+
+function showAuthOverlay() {
+  document.getElementById('auth-overlay').style.display = 'flex';
+  document.getElementById('main-app').style.display = 'none';
+  document.getElementById('share-view').style.display = 'none';
+}
+
+function showShareView() {
+  document.getElementById('auth-overlay').style.display = 'none';
+  document.getElementById('main-app').style.display = 'none';
+  document.getElementById('share-view').style.display = '';
+}
+
+// ════════════════════════════════════════════════════════════════════════
+// Auth tab switching
+// ════════════════════════════════════════════════════════════════════════
+function switchAuthTab(tab) {
+  const tabs = document.querySelectorAll('.auth-tab');
+  tabs.forEach((t, i) => t.classList.toggle('active', (i === 0) === (tab === 'login')));
+  document.getElementById('auth-login-form').style.display    = tab === 'login'    ? '' : 'none';
+  document.getElementById('auth-register-form').style.display = tab === 'register' ? '' : 'none';
+}
+
+// ════════════════════════════════════════════════════════════════════════
+// Auth actions
+// ════════════════════════════════════════════════════════════════════════
+async function doLogin() {
+  const username = document.getElementById('login-user').value.trim();
+  const password = document.getElementById('login-pass').value;
+  document.getElementById('login-err').textContent = '';
+  if (!username || !password) { document.getElementById('login-err').textContent = '请填写用户名和密码'; return; }
+  try {
+    const resp = await fetch('/auth/login', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ username, password }),
+    });
+    const data = await resp.json();
+    if (!resp.ok) { document.getElementById('login-err').textContent = data.detail || '登录失败'; return; }
+    AUTH_TOKEN = data.token || data.access_token;
+    if (!AUTH_TOKEN) { document.getElementById('login-err').textContent = '登录成功，但未收到有效 token'; return; }
+    CURRENT_USER = { username: data.username, is_admin: data.is_admin };
+    localStorage.setItem('auth_token', AUTH_TOKEN);
+    showApp();
+  } catch (e) {
+    document.getElementById('login-err').textContent = '网络错误：' + e.message;
+  }
+}
+
+async function doRegister() {
+  const username = document.getElementById('reg-user').value.trim();
+  const password = document.getElementById('reg-pass').value;
+  document.getElementById('reg-err').textContent = '';
+  if (!username || !password) { document.getElementById('reg-err').textContent = '请填写用户名和密码'; return; }
+  try {
+    const resp = await fetch('/auth/register', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ username, password }),
+    });
+    const data = await resp.json();
+    if (!resp.ok) { document.getElementById('reg-err').textContent = data.detail || '注册失败'; return; }
+    AUTH_TOKEN = data.token || data.access_token;
+    if (!AUTH_TOKEN) { document.getElementById('reg-err').textContent = '注册成功，但未收到有效 token'; return; }
+    CURRENT_USER = { username: data.username, is_admin: data.is_admin };
+    localStorage.setItem('auth_token', AUTH_TOKEN);
+    showApp();
+  } catch (e) {
+    document.getElementById('reg-err').textContent = '网络错误：' + e.message;
+  }
+}
+
+function doLogout() {
+  AUTH_TOKEN = '';
+  CURRENT_USER = null;
+  localStorage.removeItem('auth_token');
+  // Reset app state
+  currentFile = null; currentFiles = []; currentTaskId = null; resultData = null;
+  if (pollTimer) clearInterval(pollTimer);
+  document.getElementById('progress-section').style.display = 'none';
+  document.getElementById('results-section').style.display = 'none';
+  document.getElementById('codes-section').style.display = 'none';
+  document.getElementById('analyze-btn').disabled = true;
+  document.getElementById('file-name').textContent = '';
+  document.getElementById('admin-btn').style.display = 'none';
+  showAuthOverlay();
+}
+
+// ════════════════════════════════════════════════════════════════════════
+// View by code (guest or from auth overlay)
+// ════════════════════════════════════════════════════════════════════════
+async function viewCodeGuest() {
+  const raw = document.getElementById('auth-code-input').value.trim().toUpperCase();
+  document.getElementById('code-err').textContent = '';
+  if (!raw) return;
+  if (raw.startsWith('D')) {
+    await loadSharedDict(raw);
+  } else {
+    await loadSharedExam(raw);
+  }
+}
+
+async function loadSharedExam(code) {
+  code = code.toUpperCase();
+  try {
+    const resp = await fetch('/api/share/exam/' + code);
+    if (!resp.ok) {
+      const d = await resp.json();
+      document.getElementById('code-err').textContent = d.detail || '试卷码不存在';
+      return;
+    }
+    const data = await resp.json();
+    showShareView();
+
+    document.getElementById('share-banner-wrap').innerHTML = `
+      <div class="share-banner" style="margin-bottom:1.5rem">
+        <span class="sb-code">${esc(data.exam_code)}</span>
+        <div class="sb-info">
+          <strong>${esc(data.filename)}</strong>
+          <p>上传者：${esc(data.uploaded_by)} · ${fmtDate(data.created_at)}</p>
+        </div>
+      </div>`;
+
+    document.getElementById('share-results-card').style.display = '';
+    document.getElementById('share-vocab-only').style.display = 'none';
+
+    const r = data.result;
+    renderShareStats(r.structure_stats);
+    renderShareRaw(r.word_table || []);
+    renderShareLemma(r.lemma_table || []);
+    renderShareFamily(r.family_table || []);
+
+    const vocab = r.vocab_table || [];
+    document.getElementById('s-vocab-grid').innerHTML = vocab.length
+      ? vocab.map(v => vocabCardHtml(v)).join('')
+      : '';
+    if (!vocab.length) document.getElementById('s-vocab-empty').style.display = '';
+    else document.getElementById('s-vocab-empty').style.display = 'none';
+
+  } catch (e) {
+    document.getElementById('code-err').textContent = '加载失败：' + e.message;
+  }
+}
+
+async function loadSharedDict(code) {
+  code = code.toUpperCase();
+  try {
+    const resp = await fetch('/api/share/dict/' + code);
+    if (!resp.ok) {
+      const d = await resp.json();
+      document.getElementById('code-err').textContent = d.detail || '词典码不存在';
+      return;
+    }
+    const data = await resp.json();
+    showShareView();
+
+    document.getElementById('share-banner-wrap').innerHTML = `
+      <div class="share-banner" style="margin-bottom:1.5rem">
+        <span class="sb-code">${esc(data.dict_code)}</span>
+        <div class="sb-info">
+          <strong>${esc(data.filename)}</strong>
+          <p>上传者：${esc(data.uploaded_by)} · ${fmtDate(data.created_at)}</p>
+        </div>
+      </div>`;
+
+    document.getElementById('share-vocab-only').style.display = '';
+    document.getElementById('share-results-card').style.display = 'none';
+    document.getElementById('share-vocab-grid').innerHTML = (data.vocab || []).map(v => vocabCardHtml(v)).join('');
+
+  } catch (e) {
+    document.getElementById('code-err').textContent = '加载失败：' + e.message;
+  }
+}
+
+// ════════════════════════════════════════════════════════════════════════
+// File handling
+// ════════════════════════════════════════════════════════════════════════
+const dropZone = document.getElementById('drop-zone');
+const fileInput = document.getElementById('file-input');
+
+dropZone.addEventListener('dragover', e => { e.preventDefault(); dropZone.classList.add('drag-over'); });
+dropZone.addEventListener('dragleave', () => dropZone.classList.remove('drag-over'));
+dropZone.addEventListener('drop', e => {
+  e.preventDefault(); dropZone.classList.remove('drag-over');
+  if (e.dataTransfer.files.length) setFile(e.dataTransfer.files);
+});
+
+// ════════════════════════════════════════════════════════════════════════
+// Analysis
+// ════════════════════════════════════════════════════════════════════════
+function buildFormData(file) {
+  const fd = new FormData();
+  fd.append('file', file);
+  fd.append('min_word_length', g('min_word_length'));
+  fd.append('filter_stopwords', g('filter_stopwords', true));
+  fd.append('keep_proper_nouns', g('keep_proper_nouns', true));
+  fd.append('filter_numbers', g('filter_numbers', true));
+  fd.append('weight_body', g('weight_body'));
+  fd.append('weight_stem', g('weight_stem'));
+  fd.append('weight_option', g('weight_option'));
+  fd.append('top_n', g('top_n'));
+  fd.append('generate_vocab', currentFiles.length === 1 ? g('generate_vocab', true) : 'false');
+  return fd;
+}
+
+async function waitForTask(taskId) {
+  return new Promise((resolve, reject) => {
+    const t = setInterval(async () => {
+      try {
+        const r = await fetch(`/api/tasks/${taskId}`);
+        const d = await r.json();
+        if (d.status === 'done') { clearInterval(t); resolve(d); }
+        if (d.status === 'error') { clearInterval(t); reject(new Error(d.error || d.message)); }
+      } catch (e) { clearInterval(t); reject(e); }
+    }, 1200);
+  });
+}
+
+async function startAnalysis() {
+  if (!currentFiles.length) return;
+  document.getElementById('analyze-btn').disabled = true;
+  document.getElementById('codes-section').style.display = 'none';
+  document.getElementById('results-section').style.display = 'none';
+
+  if (currentFiles.length === 1) {
+    // Single-file flow (original behavior)
+    showProgress(0, '提交任务…', 'processing');
+    try {
+      const resp = await apiFetch('/api/analyze', { method: 'POST', body: buildFormData(currentFiles[0]) });
+      const data = await resp.json();
+      if (!resp.ok) throw new Error(data.detail || resp.statusText);
+      currentTaskId = data.task_id;
+      pollStatus();
+    } catch (e) {
+      showProgress(0, `提交失败：${e.message}`, 'error');
+      document.getElementById('analyze-btn').disabled = false;
+    }
+    return;
+  }
+
+  // Multi-file flow: analyze each file then combine
+  const examCodes = [];
+  try {
+    for (let i = 0; i < currentFiles.length; i++) {
+      const f = currentFiles[i];
+      showProgress(Math.round((i / currentFiles.length) * 70),
+        `分析第 ${i+1}/${currentFiles.length} 份试卷：${f.name}…`, 'processing');
+      const resp = await apiFetch('/api/analyze', { method: 'POST', body: buildFormData(f) });
+      const data = await resp.json();
+      if (!resp.ok) throw new Error(data.detail || resp.statusText);
+      const done = await waitForTask(data.task_id);
+      if (done.exam_code) examCodes.push(done.exam_code);
+    }
+    showProgress(80, '合并多试卷词频…', 'processing');
+    const provider = document.getElementById('vocab_provider').value;
+    const genVocab = g('generate_vocab', true);
+    const combResp = await apiFetch('/api/combine-exams', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        exam_codes: examCodes,
+        provider: provider || null,
+        top_n: parseInt(g('top_n')) || 60,
+        generate_vocab: genVocab,
+      }),
+    });
+    const combData = await combResp.json();
+    if (!combResp.ok) throw new Error(combData.detail || '合并失败');
+    showProgress(100, `多试卷合并完成（${examCodes.length} 份试卷）`, 'done');
+    if (combData.result) {
+      currentTaskId = combData.result.task_id;
+      resultData = combData.result;
+      renderResults(combData.result);
+      showCodes({ exam_code: combData.exam_code, dict_code: combData.dict_code });
+    }
+  } catch (e) {
+    showProgress(0, `分析失败：${e.message}`, 'error');
+  } finally {
+    document.getElementById('analyze-btn').disabled = false;
+  }
+}
+
+function g(id, isCheck = false) {
+  const el = document.getElementById(id);
+  return isCheck ? el.checked : el.value;
+}
+
+function pollStatus() {
+  if (pollTimer) clearInterval(pollTimer);
+  pollTimer = setInterval(async () => {
+    try {
+      const resp = await fetch(`/api/tasks/${currentTaskId}`);
+      const data = await resp.json();
+      updateProgress(data);
+      if (data.status === 'done' || data.status === 'error') {
+        clearInterval(pollTimer);
+        document.getElementById('analyze-btn').disabled = false;
+      }
+    } catch {}
+  }, 1000);
+}
+
+function showProgress(pct, msg, status) {
+  document.getElementById('progress-section').style.display = '';
+  document.getElementById('progress-bar').style.width = pct + '%';
+  document.getElementById('progress-msg').textContent = msg;
+  const badge = document.getElementById('status-badge');
+  badge.className = 'badge-' + status;
+  badge.textContent = { processing: '处理中', done: '完成', error: '错误', pending: '排队中' }[status] || status;
+}
+
+function updateProgress(data) {
+  showProgress(data.progress, data.message, data.status);
+  if (data.status === 'error') {
+    document.getElementById('progress-msg').innerHTML = `<span class="error-box">${data.error || data.message}</span>`;
+  }
+  if (data.status === 'done' && data.result) {
+    resultData = data.result;
+    renderResults(data.result);
+    showCodes(data);
+  }
+}
+
+// ════════════════════════════════════════════════════════════════════════
+// Code display
+// ════════════════════════════════════════════════════════════════════════
+function showCodes(taskData) {
+  const sec = document.getElementById('codes-section');
+  const examBox = document.getElementById('exam-code-box');
+  const dictBox = document.getElementById('dict-code-box');
+  const dictPending = document.getElementById('dict-code-pending');
+
+  if (!taskData.exam_code && !taskData.dict_code) return;
+
+  sec.style.display = '';
+  if (taskData.exam_code) {
+    document.getElementById('exam-code-val').textContent = taskData.exam_code;
+    examBox.style.display = '';
+  }
+  if (taskData.dict_code) {
+    document.getElementById('dict-code-val').textContent = taskData.dict_code;
+    dictBox.style.display = '';
+    dictPending.style.display = 'none';
+  } else if (taskData.exam_code) {
+    dictPending.style.display = '';
+  }
+}
+
+function updateDictCode(dictCode) {
+  const sec = document.getElementById('codes-section');
+  const dictBox = document.getElementById('dict-code-box');
+  const dictPending = document.getElementById('dict-code-pending');
+  sec.style.display = '';
+  document.getElementById('dict-code-val').textContent = dictCode;
+  dictBox.style.display = '';
+  dictPending.style.display = 'none';
+}
+
+function copyCode(elId) {
+  const txt = document.getElementById(elId).textContent;
+  navigator.clipboard.writeText(txt).then(() => {
+    const btn = event.target;
+    const orig = btn.textContent;
+    btn.textContent = '已复制!';
+    setTimeout(() => btn.textContent = orig, 1500);
+  });
+}
+
+// ════════════════════════════════════════════════════════════════════════
+// Results rendering
+// ════════════════════════════════════════════════════════════════════════
+function renderResults(r) {
+  document.getElementById('results-section').style.display = '';
+  renderStats(r.structure_stats);
+  rawSortKey = 'score'; lemmaSortKey = 'score'; familySortKey = 'score';
+  renderRaw(); renderLemma(); renderFamily();
+  renderVocab(r.vocab_table || []);
+}
+
+function renderStats(s) {
+  if (!s) return;
+  const items = [
+    { val: s.body_tokens, lbl: '正文词数' }, { val: s.stem_tokens, lbl: '题干词数' },
+    { val: s.option_tokens, lbl: '选项词数' }, { val: s.body_lines, lbl: '正文行' },
+    { val: s.stem_lines, lbl: '题干行' }, { val: s.option_lines, lbl: '选项行' },
+  ];
+  document.getElementById('stats-row').innerHTML = items.map(i =>
+    `<div class="stat-item"><div class="stat-val">${i.val}</div><div class="stat-lbl">${i.lbl}</div></div>`
+  ).join('');
+}
+
+function sortData(arr, key) {
+  return [...arr].sort((a, b) => {
+    if (key === 'option') return b.option_count - a.option_count || b.score - a.score;
+    if (key === 'total')  return b.total_count  - a.total_count  || b.score - a.score;
+    return b.score - a.score || b.total_count - a.total_count;
+  });
+}
+
+function renderRaw(sortKey) {
+  if (sortKey) rawSortKey = sortKey;
+  if (!resultData) return;
+  const q = document.getElementById('raw-search').value.toLowerCase();
+  let rows = sortData(resultData.word_table, rawSortKey);
+  if (q) rows = rows.filter(r => r.surface.includes(q) || r.lemma.includes(q));
+  document.getElementById('raw-tbody').innerHTML = rows.slice(0, 500).map((r, i) => `
+    <tr>
+      <td>${i+1}</td><td><b>${esc(r.surface)}</b></td><td>${esc(r.lemma)}</td>
+      <td>${esc(r.pos)}</td><td><small>${esc(r.family_id||'')}</small></td>
+      <td class="num">${r.body_count}</td><td class="num">${r.stem_count}</td>
+      <td class="num"><b style="color:var(--warn)">${r.option_count}</b></td>
+      <td class="num">${r.total_count}</td><td class="num score-cell">${r.score}</td>
+    </tr>`).join('');
+}
+
+function renderLemma(sortKey) {
+  if (sortKey) lemmaSortKey = sortKey;
+  if (!resultData) return;
+  const q = document.getElementById('lemma-search').value.toLowerCase();
+  let rows = sortData(resultData.lemma_table, lemmaSortKey);
+  if (q) rows = rows.filter(r => r.lemma.includes(q));
+  document.getElementById('lemma-tbody').innerHTML = rows.slice(0, 500).map((r, i) => `
+    <tr>
+      <td>${i+1}</td><td><b>${esc(r.lemma)}</b></td><td>${esc(r.pos)}</td>
+      <td><small>${esc(r.family_id||'')}</small></td>
+      <td>${r.surface_forms.map(s=>`<span class="tag">${esc(s)}</span>`).join('')}</td>
+      <td class="num">${r.body_count}</td><td class="num">${r.stem_count}</td>
+      <td class="num"><b style="color:var(--warn)">${r.option_count}</b></td>
+      <td class="num">${r.total_count}</td><td class="num score-cell">${r.score}</td>
+    </tr>`).join('');
+}
+
+function renderFamily(sortKey) {
+  if (sortKey) familySortKey = sortKey;
+  if (!resultData) return;
+  let rows = sortData(resultData.family_table, familySortKey);
+  document.getElementById('family-tbody').innerHTML = rows.slice(0, 300).map((r, i) => `
+    <tr>
+      <td>${i+1}</td><td><b>${esc(r.family_id)}</b></td>
+      <td>${r.members.map(m=>`<span class="tag tag-orange">${esc(m)}</span>`).join('')}</td>
+      <td class="num">${r.body_count}</td><td class="num">${r.stem_count}</td>
+      <td class="num"><b style="color:var(--warn)">${r.option_count}</b></td>
+      <td class="num">${r.total_count}</td><td class="num score-cell">${r.score}</td>
+    </tr>`).join('');
+}
+
+let _vocabFilter = 'all';
+
+function renderVocab(vocab) {
+  if (!vocab || vocab.length === 0) {
+    document.getElementById('vocab-empty').style.display = '';
+    document.getElementById('vocab-grid').innerHTML = '';
+    document.getElementById('vocab-toolbar').style.display = 'none';
+    return;
+  }
+  document.getElementById('vocab-empty').style.display = 'none';
+  document.getElementById('vocab-toolbar').style.display = 'flex';
+  const filtered = _vocabFilter === 'all' ? vocab
+    : vocab.filter(v => (v.word_level || '') === _vocabFilter);
+  document.getElementById('vocab-grid').innerHTML = filtered.map(v => vocabCardHtml(v, true)).join('');
+  updateSelCount(vocab);
+}
+
+function filterVocabLevel(level) {
+  _vocabFilter = level;
+  if (resultData) renderVocab(resultData.vocab_table || []);
+}
+
+function updateSelCount(vocab) {
+  if (!vocab) return;
+  const sel = vocab.filter(v => v.selected !== false).length;
+  const el = document.getElementById('sel-count');
+  if (el) el.textContent = `已选 ${sel} / ${vocab.length} 词`;
+}
+
+function toggleWordSelect(headword, checked) {
+  if (!resultData || !resultData.vocab_table) return;
+  const entry = resultData.vocab_table.find(v => v.headword === headword);
+  if (entry) entry.selected = checked;
+  const card = document.getElementById('vc-' + headword);
+  if (card) card.classList.toggle('deselected', !checked);
+  updateSelCount(resultData.vocab_table);
+}
+
+function toggleWordSelectCard(headword) {
+  if (!resultData || !resultData.vocab_table) return;
+  const entry = resultData.vocab_table.find(v => v.headword === headword);
+  if (!entry) return;
+  entry.selected = (entry.selected === false) ? true : false;
+  const card = document.getElementById('vc-' + headword);
+  if (card) {
+    card.classList.toggle('deselected', !entry.selected);
+    const cb = card.querySelector('.sel-cb');
+    if (cb) cb.checked = entry.selected;
+  }
+  updateSelCount(resultData.vocab_table);
+}
+
+function selectAllVocab(sel) {
+  if (!resultData || !resultData.vocab_table) return;
+  resultData.vocab_table.forEach(v => { v.selected = sel; });
+  renderVocab(resultData.vocab_table);
+}
+
+function selectByLevel(level) {
+  if (!resultData || !resultData.vocab_table) return;
+  resultData.vocab_table.forEach(v => {
+    v.selected = (v.word_level === level || !v.word_level);
+  });
+  renderVocab(resultData.vocab_table);
+}
+
+async function aiSelectVocab() {
+  if (!currentTaskId) return;
+  const btn = event.target;
+  btn.disabled = true; btn.textContent = '🤖 AI选词中…';
+  try {
+    const resp = await apiFetch('/api/vocab-ai-select', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ task_id: currentTaskId, goal: '高考备考', max_words: 40 }),
+    });
+    const data = await resp.json();
+    if (!resp.ok) throw new Error(data.detail || 'AI选词失败');
+    if (data.vocab && resultData) {
+      resultData.vocab_table = data.vocab.map(v => ({ ...v }));
+      renderVocab(resultData.vocab_table);
+      if (data.reasoning) {
+        const toolbar = document.getElementById('vocab-toolbar');
+        const info = document.createElement('div');
+        info.style.cssText = 'font-size:.78rem;color:var(--muted);width:100%;margin-top:.25rem';
+        info.textContent = '💡 AI选词理由：' + data.reasoning;
+        toolbar.appendChild(info);
+        setTimeout(() => info.remove(), 8000);
+      }
+    }
+  } catch (e) {
+    alert('AI选词失败：' + e.message);
+  } finally {
+    btn.disabled = false; btn.textContent = '🤖 AI智能选词';
+  }
+}
+
+function exportSelectedVocab(fmt) {
+  if (!currentTaskId) return;
+  window.location.href = `/api/tasks/${currentTaskId}/export/${fmt}?selected_only=true`;
+}
+
+function levelBadge(level) {
+  if (!level) return '';
+  return `<span class="level-badge level-${esc(level)}">${esc(level)}</span>`;
+}
+
+function vocabCardHtml(v, selectable = false) {
+  const deselected = selectable && v.selected === false;
+  const cbHtml = selectable
+    ? `<input type="checkbox" class="sel-cb" ${v.selected !== false ? 'checked' : ''}
+         onchange="toggleWordSelect('${esc(v.headword)}', this.checked)"
+         onclick="event.stopPropagation()" title="选中/取消" />`
+    : '';
+  return `<div class="vocab-card${deselected ? ' deselected' : ''}" id="vc-${esc(v.headword)}"
+    onclick="${selectable ? `toggleWordSelectCard('${esc(v.headword)}')` : ''}">
+    ${cbHtml}
+    <div class="hw-row">
+      <span class="hw">${esc(v.headword)}</span>
+      ${levelBadge(v.word_level)}
+    </div>
+    <div class="meta">${esc(v.pos||'')}${v.family?' · 词族: '+esc(v.family):''} · <span style="color:var(--primary)">${esc(v.source||'')}</span></div>
+    ${v.chinese_meaning  ? `<div class="cn">${esc(v.chinese_meaning)}</div>` : ''}
+    ${v.english_definition ? `<div class="en">${esc(v.english_definition)}</div>` : ''}
+    ${v.example_sentence  ? `<div class="ex">"${esc(v.example_sentence)}"</div>` : ''}
+    ${v.notes             ? `<div class="note">💡 ${esc(v.notes)}</div>` : ''}
+    <div class="counts">
+      <span class="c-badge">正文 ${v.body_count}</span>
+      <span class="c-badge">题干 ${v.stem_count}</span>
+      <span class="c-badge" style="background:#ffedd5;color:#c2410c">选项 ${v.option_count}</span>
+      <span class="c-badge">总 ${v.total_count}</span>
+      <span class="c-badge" style="background:#dbeafe;color:#1d4ed8">分 ${v.score}</span>
+    </div>
+  </div>`;
+}
+
+// Share view renderers
+function renderShareStats(s) {
+  if (!s) return;
+  const items = [
+    { val: s.body_tokens, lbl: '正文词数' }, { val: s.stem_tokens, lbl: '题干词数' },
+    { val: s.option_tokens, lbl: '选项词数' },
+  ];
+  document.getElementById('share-stats-row').innerHTML = items.map(i =>
+    `<div class="stat-item"><div class="stat-val">${i.val}</div><div class="stat-lbl">${i.lbl}</div></div>`
+  ).join('');
+}
+function renderShareRaw(rows) {
+  document.getElementById('s-raw-tbody').innerHTML = rows.slice(0, 500).map((r, i) => `
+    <tr><td>${i+1}</td><td><b>${esc(r.surface)}</b></td><td>${esc(r.lemma)}</td><td>${esc(r.pos)}</td>
+    <td class="num">${r.body_count}</td><td class="num">${r.stem_count}</td>
+    <td class="num"><b style="color:var(--warn)">${r.option_count}</b></td>
+    <td class="num">${r.total_count}</td><td class="num score-cell">${r.score}</td></tr>`).join('');
+}
+function renderShareLemma(rows) {
+  document.getElementById('s-lemma-tbody').innerHTML = rows.slice(0, 500).map((r, i) => `
+    <tr><td>${i+1}</td><td><b>${esc(r.lemma)}</b></td><td>${esc(r.pos)}</td>
+    <td>${(r.surface_forms||[]).map(s=>`<span class="tag">${esc(s)}</span>`).join('')}</td>
+    <td class="num">${r.body_count}</td><td class="num">${r.stem_count}</td>
+    <td class="num"><b style="color:var(--warn)">${r.option_count}</b></td>
+    <td class="num">${r.total_count}</td><td class="num score-cell">${r.score}</td></tr>`).join('');
+}
+function renderShareFamily(rows) {
+  document.getElementById('s-family-tbody').innerHTML = rows.slice(0, 300).map((r, i) => `
+    <tr><td>${i+1}</td><td><b>${esc(r.family_id)}</b></td>
+    <td>${(r.members||[]).map(m=>`<span class="tag tag-orange">${esc(m)}</span>`).join('')}</td>
+    <td class="num">${r.body_count}</td><td class="num">${r.stem_count}</td>
+    <td class="num"><b style="color:var(--warn)">${r.option_count}</b></td>
+    <td class="num">${r.total_count}</td><td class="num score-cell">${r.score}</td></tr>`).join('');
+}
+
+// ════════════════════════════════════════════════════════════════════════
+// Vocab generation
+// ════════════════════════════════════════════════════════════════════════
+async function generateVocab() {
+  if (!currentTaskId) return;
+  const btn = document.getElementById('vocab-btn');
+  btn.disabled = true; btn.textContent = '生成中…';
+
+  const provider = document.getElementById('vocab-provider-select').value;
+  const topN = document.getElementById('vocab-top-n').value;
+  const fd = new FormData();
+  if (provider) fd.append('provider', provider);
+  fd.append('top_n', topN);
+
+  try {
+    await apiFetch(`/api/tasks/${currentTaskId}/vocab`, { method: 'POST', body: fd });
+    const checkVocab = setInterval(async () => {
+      const resp = await fetch(`/api/tasks/${currentTaskId}`);
+      const data = await resp.json();
+      if (data.result && data.result.vocab_table && data.result.vocab_table.length > 0) {
+        clearInterval(checkVocab);
+        resultData = data.result;
+        renderVocab(data.result.vocab_table);
+        switchTab('tab-vocab', document.querySelectorAll('#results-section .tab-btn')[3]);
+        btn.disabled = false; btn.textContent = '✨ 生成词汇表';
+        if (data.dict_code) updateDictCode(data.dict_code);
+      }
+    }, 1500);
+  } catch (e) {
+    alert('词汇表生成失败：' + e.message);
+    btn.disabled = false; btn.textContent = '✨ 生成词汇表';
+  }
+}
+
+// ════════════════════════════════════════════════════════════════════════
+// Export
+// ════════════════════════════════════════════════════════════════════════
+function exportFile(fmt) {
+  if (!currentTaskId) return;
+  window.location.href = `/api/tasks/${currentTaskId}/export/${fmt}`;
+}
+
+// ════════════════════════════════════════════════════════════════════════
+// My Codes modal
+// ════════════════════════════════════════════════════════════════════════
+async function showMyCodes() {
+  document.getElementById('my-codes-modal').style.display = 'flex';
+  document.getElementById('my-codes-content').innerHTML = '<div class="empty">加载中…</div>';
+  try {
+    const resp = await apiFetch('/api/codes');
+    if (!resp.ok) throw new Error('加载失败');
+    const data = await resp.json();
+    let html = '';
+
+    html += `<h3 style="font-size:.95rem;font-weight:800;margin-bottom:.75rem;color:var(--muted)">试卷码（${data.exams.length}）</h3>`;
+    if (!data.exams.length) {
+      html += '<div class="empty" style="padding:1rem">暂无试卷</div>';
+    } else {
+      html += data.exams.map(e => `
+        <div class="code-list-item">
+          <span class="cli-code">${esc(e.exam_code)}</span>
+          <span class="cli-file">${esc(e.filename)}</span>
+          <span class="cli-date">${fmtDate(e.created_at)}</span>
+          <button class="copy-btn btn-sm" onclick="navigator.clipboard.writeText('${esc(e.exam_code)}').then(()=>{this.textContent='已复制!';setTimeout(()=>this.textContent='复制',1200)})">复制</button>
+          <button class="btn btn-outline btn-sm" onclick="viewExamInTab('${esc(e.exam_code)}')">查看</button>
+        </div>`).join('');
+    }
+
+    html += `<h3 style="font-size:.95rem;font-weight:800;margin-top:1.5rem;margin-bottom:.75rem;color:var(--muted)">词典码（${data.dicts.length}）</h3>`;
+    if (!data.dicts.length) {
+      html += '<div class="empty" style="padding:1rem">暂无词汇表</div>';
+    } else {
+      html += data.dicts.map(d => `
+        <div class="code-list-item">
+          <span class="cli-code" style="color:var(--success)">${esc(d.dict_code)}</span>
+          <span class="cli-file">${esc(d.filename)}${d.exam_code ? ' · 试卷码: ' + esc(d.exam_code) : ''}</span>
+          <span class="cli-date">${fmtDate(d.created_at)}</span>
+          <button class="copy-btn btn-sm" onclick="navigator.clipboard.writeText('${esc(d.dict_code)}').then(()=>{this.textContent='已复制!';setTimeout(()=>this.textContent='复制',1200)})">复制</button>
+          <button class="btn btn-outline btn-sm" onclick="viewDictInTab('${esc(d.dict_code)}')">查看</button>
+        </div>`).join('');
+    }
+
+    document.getElementById('my-codes-content').innerHTML = html;
+  } catch (e) {
+    document.getElementById('my-codes-content').innerHTML = `<div class="error-box">${e.message}</div>`;
+  }
+}
+
+function viewExamInTab(code) {
+  window.open('/?exam=' + code, '_blank');
+}
+function viewDictInTab(code) {
+  window.open('/?dict=' + code, '_blank');
+}
+
+// ════════════════════════════════════════════════════════════════════════
+// Admin modal
+// ════════════════════════════════════════════════════════════════════════
+let _adminTab = 'users';
+
+async function showAdmin() {
+  document.getElementById('admin-modal').style.display = 'flex';
+  await loadAdminUsers();
+}
+
+async function switchAdminTab(tab, btn) {
+  _adminTab = tab;
+  document.querySelectorAll('.admin-tab').forEach(b => b.classList.remove('active'));
+  if (btn) btn.classList.add('active');
+  document.getElementById('admin-users-panel').style.display = tab === 'users' ? '' : 'none';
+  document.getElementById('admin-codes-panel').style.display = tab === 'codes' ? '' : 'none';
+  if (tab === 'users') await loadAdminUsers();
+  if (tab === 'codes') await loadAdminCodes();
+}
+
+async function loadAdminUsers() {
+  const panel = document.getElementById('admin-users-panel');
+  panel.innerHTML = '<div class="empty">加载中…</div>';
+  try {
+    const resp = await apiFetch('/admin/users');
+    const users = await resp.json();
+    panel.innerHTML = users.map(u => `
+      <div class="user-row" id="user-row-${u.id}">
+        <span style="min-width:30px;color:var(--muted);font-size:.8rem">#${u.id}</span>
+        <span style="font-weight:700;flex:1">${esc(u.username)}</span>
+        <span class="user-badge ${u.is_admin ? 'admin' : ''}">${u.is_admin ? '管理员' : '用户'}</span>
+        <span style="font-size:.8rem;color:var(--muted)">试卷 ${u.exam_count} · 词典 ${u.dict_count}</span>
+        <span style="font-size:.78rem;color:var(--muted)">${fmtDate(u.created_at)}</span>
+        ${!u.is_admin ? `<button class="btn btn-outline btn-sm" onclick="toggleResetForm(${u.id})">重置密码</button>` : ''}
+        <div class="reset-form" id="reset-form-${u.id}">
+          <input type="password" id="reset-pw-${u.id}" placeholder="新密码（至少6位）" />
+          <button class="btn btn-danger btn-sm" onclick="doResetPassword(${u.id})">确认重置</button>
+          <button class="btn btn-outline btn-sm" onclick="toggleResetForm(${u.id})">取消</button>
+          <span id="reset-msg-${u.id}" style="font-size:.8rem;color:var(--success)"></span>
+        </div>
+      </div>`).join('') || '<div class="empty">暂无用户</div>';
+  } catch (e) {
+    panel.innerHTML = `<div class="error-box">${e.message}</div>`;
+  }
+}
+
+function toggleResetForm(userId) {
+  const form = document.getElementById('reset-form-' + userId);
+  form.style.display = form.style.display === 'flex' ? 'none' : 'flex';
+}
+
+async function doResetPassword(userId) {
+  const pw = document.getElementById('reset-pw-' + userId).value;
+  const msg = document.getElementById('reset-msg-' + userId);
+  msg.textContent = '';
+  msg.style.color = 'var(--success)';
+  if (!pw || pw.length < 6) { msg.style.color = 'var(--danger)'; msg.textContent = '密码至少6位'; return; }
+  try {
+    const resp = await apiFetch(`/admin/users/${userId}/reset-password`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ new_password: pw }),
+    });
+    const data = await resp.json();
+    if (!resp.ok) { msg.style.color = 'var(--danger)'; msg.textContent = data.detail || '重置失败'; return; }
+    msg.textContent = '密码已重置';
+    document.getElementById('reset-pw-' + userId).value = '';
+    setTimeout(() => toggleResetForm(userId), 1500);
+  } catch (e) {
+    msg.style.color = 'var(--danger)'; msg.textContent = '错误：' + e.message;
+  }
+}
+
+async function loadAdminCodes() {
+  const panel = document.getElementById('admin-codes-panel');
+  panel.innerHTML = '<div class="empty">加载中…</div>';
+  try {
+    const resp = await apiFetch('/admin/codes');
+    const data = await resp.json();
+    let html = '';
+
+    html += `<h3 style="font-size:.9rem;font-weight:800;color:var(--muted);margin-bottom:.75rem">试卷码（${data.exams.length}）</h3>`;
+    html += '<div class="tbl-wrap"><table><thead><tr><th>试卷码</th><th>文件名</th><th>上传者</th><th>时间</th></tr></thead><tbody>';
+    html += (data.exams.map(e => `
+      <tr>
+        <td><span class="cli-code" style="font-size:.95rem">${esc(e.exam_code)}</span></td>
+        <td>${esc(e.filename)}</td><td>${esc(e.username)}</td>
+        <td style="font-size:.8rem;color:var(--muted)">${fmtDate(e.created_at)}</td>
+      </tr>`).join('') || '<tr><td colspan="4" class="empty">暂无记录</td></tr>');
+    html += '</tbody></table></div>';
+
+    html += `<h3 style="font-size:.9rem;font-weight:800;color:var(--muted);margin-top:1.5rem;margin-bottom:.75rem">词典码（${data.dicts.length}）</h3>`;
+    html += '<div class="tbl-wrap"><table><thead><tr><th>词典码</th><th>关联试卷码</th><th>文件名</th><th>上传者</th><th>时间</th></tr></thead><tbody>';
+    html += (data.dicts.map(d => `
+      <tr>
+        <td><span class="cli-code" style="color:var(--success);font-size:.95rem">${esc(d.dict_code)}</span></td>
+        <td>${d.exam_code ? `<span class="cli-code" style="font-size:.85rem">${esc(d.exam_code)}</span>` : '—'}</td>
+        <td>${esc(d.filename)}</td><td>${esc(d.username)}</td>
+        <td style="font-size:.8rem;color:var(--muted)">${fmtDate(d.created_at)}</td>
+      </tr>`).join('') || '<tr><td colspan="5" class="empty">暂无记录</td></tr>');
+    html += '</tbody></table></div>';
+
+    panel.innerHTML = html;
+  } catch (e) {
+    panel.innerHTML = `<div class="error-box">${e.message}</div>`;
+  }
+}
+
+// ════════════════════════════════════════════════════════════════════════
+// Modals & tabs
+// ════════════════════════════════════════════════════════════════════════
+function closeModal(id) {
+  document.getElementById(id).style.display = 'none';
+}
+
+function switchTab(tabId, btn) {
+  const section = document.getElementById(tabId).closest('.card');
+  section.querySelectorAll('.tab-panel').forEach(p => p.classList.remove('active'));
+  section.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+  document.getElementById(tabId).classList.add('active');
+  if (btn) btn.classList.add('active');
+}
+
+// ════════════════════════════════════════════════════════════════════════
+// Utilities
+// ════════════════════════════════════════════════════════════════════════
+function apiFetch(url, opts = {}) {
+  opts.headers = opts.headers || {};
+  if (AUTH_TOKEN && !(opts.body instanceof FormData)) {
+    opts.headers['Authorization'] = 'Bearer ' + AUTH_TOKEN;
+  }
+  if (AUTH_TOKEN && opts.body instanceof FormData) {
+    opts.headers['Authorization'] = 'Bearer ' + AUTH_TOKEN;
+  }
+  return fetch(url, opts);
+}
+
+function esc(s) {
+  return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+
+function fmtDate(iso) {
+  if (!iso) return '';
+  const d = new Date(iso);
+  return d.toLocaleDateString('zh-CN') + ' ' + d.toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' });
+}
+
+// ════════════════════════════════════════════════════════════════════════
+// Multi-file upload
+// ════════════════════════════════════════════════════════════════════════
+function setFile(f) {
+  // Accept single file or FileList
+  currentFiles = f instanceof FileList ? Array.from(f) : [f];
+  currentFile = currentFiles[0] || null;
+  if (currentFiles.length === 1) {
+    document.getElementById('file-name').textContent =
+      `✔ 已选择：${currentFiles[0].name}（${(currentFiles[0].size/1024).toFixed(1)} KB）`;
+    document.getElementById('multi-file-list').style.display = 'none';
+  } else {
+    document.getElementById('file-name').textContent = `✔ 已选择 ${currentFiles.length} 个文件`;
+    document.getElementById('multi-file-list').style.display = '';
+    document.getElementById('multi-file-list').innerHTML = currentFiles.map((f, i) =>
+      `<div style="font-size:.8rem;color:var(--muted);padding:.1rem 0">
+         ${i+1}. ${esc(f.name)} (${(f.size/1024).toFixed(1)} KB)
+       </div>`).join('');
+  }
+  document.getElementById('analyze-btn').disabled = false;
+}
+
+// Override file input handler for multi
+document.getElementById('file-input').addEventListener('change', function() {
+  if (this.files.length) setFile(this.files);
+});
+
+// ════════════════════════════════════════════════════════════════════════
+// Profile
+// ════════════════════════════════════════════════════════════════════════
+async function showProfile() {
+  document.getElementById('profile-modal').style.display = 'flex';
+  document.getElementById('profile-username').value = CURRENT_USER?.username || '';
+  document.getElementById('profile-display-name').value = CURRENT_USER?.display_name || '';
+  document.getElementById('profile-email').value = CURRENT_USER?.email || '';
+  document.getElementById('profile-provider').value = CURRENT_USER?.preferred_provider || '';
+  document.getElementById('profile-msg').textContent = '';
+  document.getElementById('pw-msg').textContent = '';
+  document.getElementById('pw-old').value = '';
+  document.getElementById('pw-new').value = '';
+  document.getElementById('pw-confirm').value = '';
+}
+
+async function saveProfile() {
+  const display_name = document.getElementById('profile-display-name').value.trim();
+  const email = document.getElementById('profile-email').value.trim();
+  const msg = document.getElementById('profile-msg');
+  msg.style.color = 'var(--muted)'; msg.textContent = '保存中…';
+  try {
+    const resp = await apiFetch('/auth/profile', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ display_name: display_name || null, email: email || null }),
+    });
+    const data = await resp.json();
+    if (!resp.ok) { msg.style.color = 'var(--danger)'; msg.textContent = data.detail || '保存失败'; return; }
+    if (CURRENT_USER) { CURRENT_USER.display_name = data.display_name; CURRENT_USER.email = data.email; }
+    msg.style.color = 'var(--success)'; msg.textContent = '✔ 信息已保存';
+    const uname = CURRENT_USER?.display_name || CURRENT_USER?.username || '';
+    document.getElementById('username-display').textContent = '👤 ' + uname;
+  } catch (e) {
+    msg.style.color = 'var(--danger)'; msg.textContent = '错误：' + e.message;
+  }
+}
+
+async function changePassword() {
+  const oldPw = document.getElementById('pw-old').value;
+  const newPw = document.getElementById('pw-new').value;
+  const confirm = document.getElementById('pw-confirm').value;
+  const msg = document.getElementById('pw-msg');
+  msg.textContent = '';
+  if (!oldPw || !newPw) { msg.style.color = 'var(--danger)'; msg.textContent = '请填写完整'; return; }
+  if (newPw.length < 6) { msg.style.color = 'var(--danger)'; msg.textContent = '新密码至少6位'; return; }
+  if (newPw !== confirm) { msg.style.color = 'var(--danger)'; msg.textContent = '两次输入不一致'; return; }
+  msg.style.color = 'var(--muted)'; msg.textContent = '修改中…';
+  try {
+    const resp = await apiFetch('/auth/change-password', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ old_password: oldPw, new_password: newPw }),
+    });
+    const data = await resp.json();
+    if (!resp.ok) { msg.style.color = 'var(--danger)'; msg.textContent = data.detail || '修改失败'; return; }
+    msg.style.color = 'var(--success)'; msg.textContent = '✔ 密码已修改';
+    document.getElementById('pw-old').value = '';
+    document.getElementById('pw-new').value = '';
+    document.getElementById('pw-confirm').value = '';
+  } catch (e) {
+    msg.style.color = 'var(--danger)'; msg.textContent = '错误：' + e.message;
+  }
+}
+
+// ════════════════════════════════════════════════════════════════════════
+// Multi-exam combine
+// ════════════════════════════════════════════════════════════════════════
+let _myExams = [];
+
+async function showMultiExamModal() {
+  document.getElementById('multi-exam-modal').style.display = 'flex';
+  document.getElementById('multi-exam-msg').textContent = '';
+  const listEl = document.getElementById('multi-exam-list');
+  listEl.innerHTML = '<div class="empty">加载中…</div>';
+  try {
+    const resp = await apiFetch('/api/exams');
+    _myExams = await resp.json();
+    if (!_myExams.length) {
+      listEl.innerHTML = '<div class="empty">暂无已分析试卷，请先上传并分析试卷</div>';
+      return;
+    }
+    listEl.innerHTML = _myExams.map(e => `
+      <label class="exam-check-item">
+        <input type="checkbox" class="multi-exam-cb" value="${esc(e.exam_code)}"
+          onchange="updateMultiExamInfo()" />
+        <span class="eci-code">${esc(e.exam_code)}</span>
+        <span class="eci-file">${esc(e.filename)}
+          ${e.is_combined ? '<span class="eci-badge">合并卷</span>' : ''}
+        </span>
+        <span style="font-size:.75rem;color:var(--muted)">${e.lemma_count}词 · ${fmtDate(e.created_at)}</span>
+      </label>`).join('');
+    updateMultiExamInfo();
+  } catch (e) {
+    listEl.innerHTML = `<div class="error-box">${e.message}</div>`;
+  }
+}
+
+function updateMultiExamInfo() {
+  const checked = document.querySelectorAll('.multi-exam-cb:checked');
+  const infoEl = document.getElementById('multi-exam-selected-info');
+  infoEl.textContent = checked.length
+    ? `已选 ${checked.length} 份试卷，将合并分析`
+    : '请至少选择2份试卷';
+}
+
+async function runMultiExamCombine() {
+  const checked = Array.from(document.querySelectorAll('.multi-exam-cb:checked'));
+  if (checked.length < 2) {
+    document.getElementById('multi-exam-msg').style.color = 'var(--danger)';
+    document.getElementById('multi-exam-msg').textContent = '请至少选择2份试卷';
+    return;
+  }
+  const exam_codes = checked.map(cb => cb.value);
+  const provider = document.getElementById('multi-provider').value;
+  const top_n = parseInt(document.getElementById('multi-top-n').value) || 60;
+  const generate_vocab = document.getElementById('multi-gen-vocab').checked;
+
+  const msg = document.getElementById('multi-exam-msg');
+  msg.style.color = 'var(--muted)'; msg.textContent = '合并分析中，请稍候…';
+  const btn = document.querySelector('#multi-exam-modal .btn-primary');
+  btn.disabled = true;
+
+  try {
+    const resp = await apiFetch('/api/combine-exams', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ exam_codes, provider: provider || null, top_n, generate_vocab }),
+    });
+    const data = await resp.json();
+    if (!resp.ok) throw new Error(data.detail || '合并失败');
+
+    msg.style.color = 'var(--success)';
+    msg.textContent = `✔ 合并完成！词汇量 ${data.lemma_count}，词汇表 ${data.vocab_count} 词`;
+
+    // Load the result into main view
+    if (data.result) {
+      currentTaskId = data.result.task_id;
+      resultData = data.result;
+      // Add to task store via fake task
+      document.getElementById('codes-section').style.display = '';
+      document.getElementById('exam-code-box').style.display = '';
+      document.getElementById('exam-code-val').textContent = data.exam_code;
+      if (data.dict_code) {
+        document.getElementById('dict-code-val').textContent = data.dict_code;
+        document.getElementById('dict-code-box').style.display = '';
+      }
+      renderResults(data.result);
+      setTimeout(() => closeModal('multi-exam-modal'), 1500);
+    }
+  } catch (e) {
+    msg.style.color = 'var(--danger)'; msg.textContent = '错误：' + e.message;
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+// ════════════════════════════════════════════════════════════════════════
+// Update showApp to load full user profile
+// ════════════════════════════════════════════════════════════════════════
+const _origShowApp = window.showApp;
+window.showApp = function () {
+  _origShowApp();
+  // Fetch full profile (includes email, display_name)
+  apiFetch('/auth/me').then(r => r.json()).then(data => {
+    if (data) {
+      CURRENT_USER = { ...CURRENT_USER, ...data };
+      const name = data.display_name || data.username;
+      document.getElementById('username-display').textContent = '👤 ' + name;
+    }
+  }).catch(() => {});
+};
+</script>
+<script src="/assets/app-enhancements.js"></script>
+</body>
+</html>
