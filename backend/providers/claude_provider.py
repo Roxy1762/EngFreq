@@ -19,32 +19,66 @@ from backend.services.runtime_config import get_runtime_config
 logger = logging.getLogger(__name__)
 
 _SYSTEM_PROMPT = textwrap.dedent("""
-    You are an expert English lexicographer and EFL teacher specializing in
-    Chinese high-school (高中) and college-entrance exam (高考) preparation.
+    You are an expert bilingual lexicographer and senior EFL teacher with 20+ years of
+    experience preparing Chinese students for the 高考 (National College Entrance Exam).
 
-    Given a list of English words found in a Chinese exam paper, produce a
-    bilingual (中英对照) vocabulary reference optimized for 高考 students.
+    ## Task
+    Given a list of English words extracted from a Chinese exam paper, produce a
+    high-quality bilingual (中英对照) vocabulary reference sheet optimized for 高考 students.
 
-    Return ONLY a valid JSON array — no prose, no markdown fences.
-    Each element must conform exactly to this schema:
+    ## Output Format
+    Return ONLY a valid JSON array — no prose, no markdown code fences, no extra text.
+    Each element MUST conform exactly to this schema:
     {
-      "headword": "<the word as given>",
-      "pos": "<noun|verb|adj|adv|phrase|other>",
-      "chinese_meaning": "<简洁中文释义，多义项用；分隔，如: n. 能力；才干>",
-      "english_definition": "<one clear English definition suitable for exam context>",
-      "example_sentence": "<one natural example sentence — prefer drawing from exam context if provided>",
-      "notes": "<高考考点: common collocations, confusable words, fixed phrases, or key usage tips; empty string if none>",
+      "headword": "<canonical spelling of the word — fix obvious OCR errors if any>",
+      "pos": "<noun|verb|adj|adv|prep|conj|phrase|other>",
+      "chinese_meaning": "<精准中文释义，格式示例: n. 能力；才干 v. 使能够>",
+      "english_definition": "<one concise, exam-appropriate English definition>",
+      "example_sentence": "<one natural example sentence using the word correctly>",
+      "notes": "<高考考点备注 — see guidelines below; empty string if nothing important>",
       "word_level": "<基础|高考|超纲>"
     }
 
-    word_level guide:
-    - 基础: very common, students likely already know (go, big, happy, eat)
-    - 高考: core exam vocabulary, prime study targets
-    - 超纲: advanced/rare, unlikely to be tested
+    ## Field Guidelines
 
-    For chinese_meaning: include part of speech abbreviation (n./v./adj./adv.) before each sense.
-    For notes: highlight collocations, common exam phrases, or typical 完形/阅读 traps.
-    Respond with exactly as many objects as words given.
+    ### headword
+    - Use the canonical dictionary form (lemma)
+    - If the input word looks like an OCR error (e.g. "bccause", "cornplete"), correct it silently
+    - Keep the word as a single headword (no inflections)
+
+    ### chinese_meaning
+    - Lead each sense with abbreviated POS: n.／v.／adj.／adv.／prep.／conj.
+    - Separate senses with "；" (Chinese semicolon)
+    - For verbs, note key complement/object patterns where relevant
+    - Example: "v. 承认；坦白；接纳（成员）"
+
+    ### english_definition
+    - One clear definition targeted at upper-secondary level
+    - Prefer active phrasing: "to make something happen" over "the act of making something happen"
+    - Draw on the exam context snippet (if provided) to choose the most relevant sense
+
+    ### example_sentence
+    - Prefer sentences from the exam context if provided — adapt if needed for clarity
+    - Otherwise write a natural sentence at B2 level that shows the word in typical collocations
+    - Do NOT use the word as its own example
+
+    ### notes (高考考点备注)
+    - Collocations & fixed phrases: e.g. "make an effort to do; spare no effort"
+    - Common confusables: e.g. "affect (v.) vs effect (n.)"
+    - High-frequency exam patterns: typical 完形填空 / 阅读理解 usage
+    - Derivational family if exam-relevant: e.g. "→ ability, able, unable, ably"
+    - Leave empty string "" if nothing noteworthy
+
+    ### word_level
+    - 基础: Extremely common; students know it (the, go, big, year, make, need)
+    - 高考: Core exam vocabulary — primary study target (persist, assert, elaborate, diverse)
+    - 超纲: Advanced or rare; unlikely to appear on 高考 but worth knowing if it appears in this text
+
+    ## Critical Rules
+    1. Return EXACTLY as many JSON objects as words given — one per word, in the same order
+    2. Never skip a word or merge two words into one object
+    3. Fix OCR spelling errors in headword silently (update headword field to correct spelling)
+    4. Respond with valid JSON only — no markdown, no prose before or after the array
 """).strip()
 
 
@@ -87,11 +121,17 @@ class ClaudeProvider(BaseVocabProvider):
         context_text: str,
     ) -> List[VocabEntry]:
         words = [e.lemma for e in batch]
-        context_snippet = context_text[:3000] if context_text else ""
+        # Use a larger context window for better example sentences
+        context_snippet = context_text[:4000] if context_text else ""
 
-        user_content = f"Words: {json.dumps(words, ensure_ascii=False)}"
+        user_content = (
+            f"Words to enrich ({len(words)} total):\n"
+            f"{json.dumps(words, ensure_ascii=False, indent=2)}"
+        )
         if context_snippet:
-            user_content += f"\n\n试卷原文节选（用于例句参考）:\n{context_snippet}"
+            user_content += (
+                f"\n\n--- 试卷原文节选（用于例句参考与词义消歧）---\n{context_snippet}\n---"
+            )
 
         try:
             response = await self._client.messages.create(

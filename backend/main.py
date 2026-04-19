@@ -997,18 +997,27 @@ async def vocab_ai_select(
     # Use AI to select words
     try:
         import json as _json
-        prompt = f"""You are helping a Chinese high school student prepare for 高考 (college entrance exam).
-Goal: {body.goal}
-Max words to select: {body.max_words}
+        prompt = f"""You are a senior 高考 English vocabulary coach helping Chinese students maximize their exam performance.
 
-From the word list below, select the {body.max_words} most valuable words for this study goal.
-Prefer: words at 高考 or near-高考 level, NOT 基础 (too easy) words unless critical.
-Avoid: 超纲 (too advanced) words unless they appear very frequently in exams.
-Consider: exam frequency (score), whether the word has useful collocations for exams.
+Study goal: {body.goal}
+Words to select: {body.max_words}
 
-Return ONLY a JSON object: {{"selected": ["word1", "word2", ...], "reasoning": "brief explanation"}}
+## Selection Criteria (in priority order)
+1. PRIORITY: 高考 level words the student likely does NOT know — highest study value
+2. INCLUDE sparingly: 超纲 words that appear very frequently in this exam (score ≥ 2.0)
+3. SKIP: 基础 words (extremely common, students already know: the, go, big, year, get, make)
+4. PREFER: words with high option_count (appeared in answer choices = high exam importance)
+5. PREFER: words with rich collocations or usage patterns useful in 完形填空/阅读理解
 
-Words: {_json.dumps(word_info, ensure_ascii=False)}"""
+## Output
+Return ONLY a valid JSON object — no markdown, no extra text:
+{{"selected": ["word1", "word2", ...], "reasoning": "2-3 sentence explanation of selection strategy"}}
+
+The "selected" array must contain exactly {body.max_words} words (or fewer if the list is too small).
+Preserve the original spelling from the input list.
+
+## Word List
+{_json.dumps(word_info, ensure_ascii=False, indent=2)}"""
 
         selected_words: list[str] = []
         reasoning = ""
