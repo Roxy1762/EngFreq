@@ -21,25 +21,36 @@ from typing import Optional
 logger = logging.getLogger(__name__)
 
 _CLEAN_SYSTEM_PROMPT = textwrap.dedent("""
-    You are a text restoration expert. You will receive raw OCR output from a scanned
-    English exam paper. The text may have:
-    - Broken lines and incorrect line breaks
-    - Garbled characters (0 vs O, 1 vs l/I, rn vs m, etc.)
-    - Missing spaces or extra spaces
-    - Merged words or split words
-    - Stray punctuation from scan artifacts
+    You are a specialized text restoration expert for Chinese high school and college entrance
+    exam (高考) papers. You receive raw OCR output from scanned English exam papers.
 
-    Your task: Clean and restore the text to match what was likely printed on the original exam.
+    ## Common OCR Problems to Fix
+    - Character confusion: 0↔O, 1↔l↔I, rn↔m, vv↔w, cl↔d, li↔h, ii↔u
+    - Broken hyphenation: "im-portant" → "important", "be-cause" → "because"
+    - Missing spaces: "Inthepast" → "In the past", "whichof" → "which of"
+    - Extra spaces: "com plete" → "complete", "a ble" → "able"
+    - Merged lines: two sentences run together without newline
+    - Mangled option labels: "A，" / "A:" / "(A)" → normalize to "A. "
+    - Stray characters from scan artifacts: isolated symbols, repeated dashes
 
-    Rules:
-    1. Preserve ALL content — do not remove words, sentences, or answer choices
-    2. Fix obvious OCR errors in context (e.g. "Ihe" → "The", "rn" → "m" where applicable)
-    3. Restore proper line breaks for question structure (question number, stem, options A/B/C/D)
-    4. Keep option labels (A. B. C. D.) on their own lines
-    5. Do NOT translate, paraphrase, or add any content
-    6. Return ONLY the cleaned text — no explanations, no headers
+    ## Exam Structure to Preserve and Restore
+    Chinese English exams always follow this structure — restore it if broken:
+    1. Part / Section headers (e.g. "Part I  Reading Comprehension")
+    2. Instruction line (e.g. "Directions: Read the passage and answer the questions.")
+    3. Passage / dialogue (body text — keep paragraphs)
+    4. Question stems (numbered: "1.", "2.", etc.)
+    5. Answer options on SEPARATE lines, each starting with "A. " "B. " "C. " "D. "
+       - If all 4 options appear on one line, split them onto 4 separate lines
+       - Option labels must be uppercase: A, B, C, D
 
-    Keep the exam structure: title/instruction → question stem → options.
+    ## Rules
+    1. Preserve ALL content — never delete words, sentences, or options
+    2. Fix only clear OCR errors — do not rephrase or simplify
+    3. Do NOT translate any English text to Chinese or vice versa
+    4. Do NOT add explanations, comments, or headers
+    5. Return ONLY the cleaned exam text
+
+    Output the restored exam text directly, nothing else.
 """).strip()
 
 
@@ -74,10 +85,16 @@ async def clean_ocr_text(raw_text: str, backend: str = "none", context: str = ""
 
 
 def _build_user_message(raw_text: str, context: str) -> str:
-    msg = "Please clean the following OCR text from an exam paper:\n\n"
-    if context:
-        msg += f"Context: {context}\n\n"
-    msg += "---\n" + raw_text + "\n---"
+    ctx_hint = context or "Chinese high school English exam (高考), multiple choice + reading"
+    msg = (
+        f"Exam type: {ctx_hint}\n\n"
+        "Please restore the following raw OCR text from this exam paper. "
+        "Fix OCR errors, restore exam structure, and ensure each answer option "
+        "(A/B/C/D) is on its own line:\n\n"
+        "===BEGIN OCR TEXT===\n"
+        + raw_text +
+        "\n===END OCR TEXT==="
+    )
     return msg
 
 

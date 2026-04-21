@@ -17,7 +17,7 @@ load_dotenv(override=False)
 
 class Settings(BaseSettings):
     host: str = "0.0.0.0"
-    port: int = 8000
+    port: int = 20120
 
     secret_key: Optional[str] = None
     admin_username: str = "admin"

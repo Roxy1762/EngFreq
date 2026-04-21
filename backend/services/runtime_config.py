@@ -90,6 +90,8 @@ class RuntimeConfig(BaseModel):
     ocr_cache_enabled: bool = True
     text_cleaner: TextCleanerConfig = Field(default_factory=TextCleanerConfig)
     llm: LLMProviderConfig = Field(default_factory=LLMProviderConfig)
+    # AI vocabulary pre-processing: spell-fix + re-rank before enrichment
+    ai_preprocess_enabled: bool = False
 
 
 def _default_config() -> RuntimeConfig:

@@ -679,8 +679,72 @@ async function loadConfig() {
           <div class="field"><label>词汇提供源</label><select class="cfg-input" id="cfg-provider">
             ${(data.providers||[]).map(n => `<option value="${n}"${cfg.vocab_provider===n?' selected':''}>${n}</option>`).join('')}
           </select></div>
-          <div class="field"><label>AI 模型</label><input class="cfg-input" id="cfg-ai-model" type="text" value="${esc(cfg.ai_model||'')}" /></div>
+          <div class="field"><label>AI 模型（用于词汇富化）</label><input class="cfg-input" id="cfg-ai-model" type="text" placeholder="claude-opus-4-6" value="${esc(cfg.ai_model||'')}" /></div>
           <div class="field"><label>AI 批量大小（1-50）</label><input class="cfg-input" id="cfg-ai-batch-size" type="number" min="1" max="50" value="${cfg.ai_batch_size??20}" /></div>
+        </div>
+
+        <div class="settings-card">
+          <h3>AI 提供商密钥</h3>
+          <p style="font-size:.78rem;color:var(--muted);margin-bottom:.75rem">在此配置 AI 服务商的 API 密钥。留空则保持现有值不变。</p>
+          <div class="field"><label>Anthropic API Key（Claude）</label>
+            <input class="cfg-input" id="cfg-anthropic-key" type="password"
+              placeholder="${cfg.llm?.anthropic_api_key ? '● 已配置（留空不修改）' : '未配置，输入后保存'}" />
+          </div>
+          <div class="field"><label>DeepSeek API Key</label>
+            <input class="cfg-input" id="cfg-deepseek-key" type="password"
+              placeholder="${cfg.llm?.deepseek_api_key ? '● 已配置（留空不修改）' : '未配置，输入后保存'}" />
+          </div>
+          <div class="field"><label>DeepSeek API 地址</label>
+            <input class="cfg-input" id="cfg-deepseek-url" type="text"
+              value="${esc(cfg.llm?.deepseek_base_url||'https://api.deepseek.com/v1')}" />
+          </div>
+          <div class="field"><label>DeepSeek 模型</label>
+            <input class="cfg-input" id="cfg-deepseek-model" type="text"
+              value="${esc(cfg.llm?.deepseek_model||'deepseek-chat')}" />
+          </div>
+          <div class="field"><label>OpenAI / 兼容接口 API Key</label>
+            <input class="cfg-input" id="cfg-openai-key" type="password"
+              placeholder="${cfg.llm?.openai_api_key ? '● 已配置（留空不修改）' : '未配置，输入后保存'}" />
+          </div>
+          <div class="field"><label>OpenAI Base URL（留空用官方地址）</label>
+            <input class="cfg-input" id="cfg-openai-url" type="text"
+              value="${esc(cfg.llm?.openai_base_url||'')}" placeholder="https://api.openai.com/v1" />
+          </div>
+          <div class="field"><label>OpenAI 模型</label>
+            <input class="cfg-input" id="cfg-openai-model" type="text"
+              value="${esc(cfg.llm?.openai_model||'gpt-4o-mini')}" />
+          </div>
+        </div>
+
+        <div class="settings-card">
+          <h3>AI 处理流程</h3>
+          <p style="font-size:.78rem;color:var(--muted);margin-bottom:.75rem">
+            处理流程：文本输入 → 剔除常见词 → <b>AI 纠错+重排</b>（可选）→ 词汇表 → AI 中文释义
+          </p>
+          <div class="toggle-field" style="margin-bottom:.5rem">
+            <label>
+              <b>OCR 文本 AI 清理</b>
+              <span style="display:block;font-size:.75rem;color:var(--muted);font-weight:400">扫描件OCR后用AI修复识别错误、恢复结构</span>
+            </label>
+            <label class="switch"><input id="cfg-text-cleaner-enabled" type="checkbox"${cfg.text_cleaner?.enabled?' checked':''} /><span class="slider"></span></label>
+          </div>
+          <div class="field"><label>OCR 清理后端</label>
+            <select class="cfg-input" id="cfg-text-cleaner-backend">
+              ${['none','claude','deepseek','openai'].map(n=>`<option value="${n}"${(cfg.text_cleaner?.backend||'none')===n?' selected':''}>${n}</option>`).join('')}
+            </select>
+          </div>
+          <div class="field"><label>OCR 上下文提示</label>
+            <input class="cfg-input" id="cfg-text-cleaner-hint" type="text"
+              value="${esc(cfg.text_cleaner?.context_hint||'Chinese high school English exam, multiple choice')}" />
+          </div>
+          <hr style="margin:1rem 0;border:none;border-top:1px solid var(--border)">
+          <div class="toggle-field" style="margin-bottom:.5rem">
+            <label>
+              <b>词汇 AI 预处理（纠错+重排）</b>
+              <span style="display:block;font-size:.75rem;color:var(--muted);font-weight:400">词频分析后，AI修正OCR拼写错误并按高考重要性重新排序</span>
+            </label>
+            <label class="switch"><input id="cfg-ai-preprocess" type="checkbox"${cfg.ai_preprocess_enabled?' checked':''} /><span class="slider"></span></label>
+          </div>
         </div>
 
         <div class="settings-card">
@@ -733,6 +797,20 @@ async function saveConfig() {
   const status = document.getElementById('cfg-status');
   status.textContent = '保存中…'; status.style.color = 'var(--muted)';
   const g = id => document.getElementById(id);
+  // Build LLM config — only include API keys if user typed something
+  const llmCfg = {
+    deepseek_base_url: g('cfg-deepseek-url').value.trim(),
+    deepseek_model: g('cfg-deepseek-model').value.trim(),
+    openai_base_url: g('cfg-openai-url').value.trim() || null,
+    openai_model: g('cfg-openai-model').value.trim(),
+  };
+  const anthropicKey = g('cfg-anthropic-key').value.trim();
+  if (anthropicKey) llmCfg.anthropic_api_key = anthropicKey;
+  const deepseekKey = g('cfg-deepseek-key').value.trim();
+  if (deepseekKey) llmCfg.deepseek_api_key = deepseekKey;
+  const openaiKey = g('cfg-openai-key').value.trim();
+  if (openaiKey) llmCfg.openai_api_key = openaiKey;
+
   const payload = {
     parse_backend: g('cfg-parse-backend').value,
     save_raw_parse_result: g('cfg-save-raw-parse').checked,
@@ -740,6 +818,7 @@ async function saveConfig() {
     vocab_provider: g('cfg-provider').value,
     ai_model: g('cfg-ai-model').value.trim(),
     ai_batch_size: Number(g('cfg-ai-batch-size').value),
+    ai_preprocess_enabled: g('cfg-ai-preprocess').checked,
     analysis: {
       min_word_length: Number(g('cfg-min-word-length').value),
       top_n: Number(g('cfg-top-n').value),
@@ -776,6 +855,12 @@ async function saveConfig() {
       poll_timeout_sec: Number(g('cfg-mineru-timeout').value),
       poll_interval_sec: Number(g('cfg-mineru-interval').value),
     },
+    text_cleaner: {
+      enabled: g('cfg-text-cleaner-enabled').checked,
+      backend: g('cfg-text-cleaner-backend').value,
+      context_hint: g('cfg-text-cleaner-hint').value.trim(),
+    },
+    llm: llmCfg,
   };
   try {
     const resp = await apiFetch('/admin/config', {method:'PUT', body: JSON.stringify(payload)});
@@ -829,8 +914,11 @@ async function loadSystem() {
           <div class="info-row"><span class="info-key">Python 版本</span><span class="info-val" style="font-size:.78rem">${esc(data.python_version||'—')}</span></div>
           <div class="info-row"><span class="info-key">spaCy 模型</span><span class="info-val">${data.spacy_model_loaded?'✓ en_core_web_sm':'✗ 未加载'}</span></div>
           <div class="info-row"><span class="info-key">Anthropic Key</span><span class="info-val">${data.has_anthropic_key?'✓ 已配置':'✗ 未配置'}</span></div>
+          <div class="info-row"><span class="info-key">DeepSeek Key</span><span class="info-val">${data.has_deepseek_key?'✓ 已配置':'✗ 未配置'}</span></div>
+          <div class="info-row"><span class="info-key">OpenAI Key</span><span class="info-val">${data.has_openai_key?'✓ 已配置':'✗ 未配置'}</span></div>
           <div class="info-row"><span class="info-key">Merriam-Webster Key</span><span class="info-val">${data.has_mw_key?'✓ 已配置':'✗ 未配置'}</span></div>
           <div class="info-row"><span class="info-key">AI 模型</span><span class="info-val" style="font-size:.8rem">${esc(data.ai_model||'—')}</span></div>
+          <div class="info-row"><span class="info-key">DeepSeek URL</span><span class="info-val" style="font-size:.75rem">${esc(data.deepseek_base_url||'—')}</span></div>
           <div class="info-row"><span class="info-key">上传目录</span><span class="info-val" style="font-size:.78rem">${esc(data.upload_dir||'—')}</span></div>
           <div class="info-row"><span class="info-key">数据库路径</span><span class="info-val" style="font-size:.78rem">${esc(data.db_path||'—')}</span></div>
         </div>
