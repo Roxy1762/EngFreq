@@ -29,14 +29,29 @@ _POS_MAP = {
 }
 
 
+def _get_youdao_creds() -> tuple[str, str]:
+    try:
+        from backend.services.runtime_config import get_runtime_config
+        dp = get_runtime_config().dict_providers
+        key = dp.youdao_app_key or settings.youdao_app_key or ""
+        secret = dp.youdao_app_secret or settings.youdao_app_secret or ""
+        return key, secret
+    except Exception:
+        return settings.youdao_app_key or "", settings.youdao_app_secret or ""
+
+
 class YoudaoProvider(BaseVocabProvider):
     name = "youdao"
 
     def __init__(self):
-        self._app_key = settings.youdao_app_key
-        self._app_secret = settings.youdao_app_secret
+        app_key, app_secret = _get_youdao_creds()
+        self._app_key = app_key
+        self._app_secret = app_secret
         if not self._app_key or not self._app_secret:
-            raise RuntimeError("YOUDAO_APP_KEY and YOUDAO_APP_SECRET must be configured")
+            raise RuntimeError(
+                "Youdao credentials not configured. "
+                "Set them in the admin panel under '词典工具密钥' or via YOUDAO_APP_KEY/YOUDAO_APP_SECRET in .env"
+            )
 
         try:
             import httpx

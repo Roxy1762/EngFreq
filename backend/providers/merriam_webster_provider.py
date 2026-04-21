@@ -21,12 +21,26 @@ _BASE_URL = "https://www.dictionaryapi.com/api/v3/references/collegiate/json/{wo
 _CONCURRENCY = 5
 
 
+def _get_mw_key() -> str:
+    try:
+        from backend.services.runtime_config import get_runtime_config
+        key = get_runtime_config().dict_providers.merriam_webster_key
+        if key:
+            return key
+    except Exception:
+        pass
+    return settings.merriam_webster_key or ""
+
+
 class MerriamWebsterProvider(BaseVocabProvider):
     name = "merriam_webster"
 
     def __init__(self):
-        if not settings.merriam_webster_key:
-            raise RuntimeError("MERRIAM_WEBSTER_KEY not configured in .env")
+        if not _get_mw_key():
+            raise RuntimeError(
+                "Merriam-Webster API key not configured. "
+                "Set it in the admin panel under '词典工具密钥' or via MERRIAM_WEBSTER_KEY in .env"
+            )
 
     async def enrich(
         self,
@@ -58,7 +72,7 @@ class MerriamWebsterProvider(BaseVocabProvider):
             try:
                 resp = await client.get(
                     url,
-                    params={"key": settings.merriam_webster_key},
+                    params={"key": _get_mw_key()},
                 )
                 resp.raise_for_status()
                 data = resp.json()

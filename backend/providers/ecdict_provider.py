@@ -84,16 +84,27 @@ def _csv_to_sqlite(csv_path: Path, db_path: Path) -> None:
     logger.info("ECDICT: converted %s → %s", csv_path.name, db_path.name)
 
 
+def _get_ecdict_path() -> str:
+    try:
+        from backend.services.runtime_config import get_runtime_config
+        path = get_runtime_config().dict_providers.ecdict_path
+        if path:
+            return path
+    except Exception:
+        pass
+    return settings.ecdict_path or ""
+
+
 class ECDICTProvider(BaseVocabProvider):
     name = "ecdict"
 
     def __init__(self):
-        raw_path = settings.ecdict_path
+        raw_path = _get_ecdict_path()
         if not raw_path:
             raise RuntimeError(
                 "ECDICT_PATH not configured. "
-                "Download ecdict.csv from https://github.com/skywind3000/ECDICT "
-                "and set ECDICT_PATH in .env"
+                "Set it in the admin panel under '词典工具密钥' (ECDICT 路径) or via ECDICT_PATH in .env. "
+                "Download ecdict.csv from https://github.com/skywind3000/ECDICT"
             )
 
         path = Path(raw_path)

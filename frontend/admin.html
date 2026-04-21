@@ -774,7 +774,8 @@ async function loadConfig() {
           <div class="toggle-field"><label>开放注册</label><label class="switch"><input id="cfg-registration" type="checkbox"${cfg.registration_enabled?' checked':''} /><span class="slider"></span></label></div>
           <h3 style="margin-top:1rem">MinerU 解析</h3>
           <div class="toggle-field"><label>启用 MinerU</label><label class="switch"><input id="cfg-mineru-enabled" type="checkbox"${mineru.enabled?' checked':''} /><span class="slider"></span></label></div>
-          <div class="field"><label>API 地址</label><input class="cfg-input" id="cfg-mineru-api-base" type="text" value="${esc(mineru.api_base||'https://mineru.net/api/v1/agent')}" /></div>
+          <div class="field"><label>API 密钥（Bearer Token）</label><input class="cfg-input" id="cfg-mineru-api-key" type="password" placeholder="${mineru.api_key ? '● 已配置（留空不修改）' : '未配置，输入后保存'}" /></div>
+          <div class="field"><label>API 地址</label><input class="cfg-input" id="cfg-mineru-api-base" type="text" value="${esc(mineru.api_base||'https://mineru.net/api/v4')}" /></div>
           <div class="field"><label>语言</label><input class="cfg-input" id="cfg-mineru-language" type="text" value="${esc(mineru.language||'en')}" /></div>
           <div class="field"><label>页范围（如 1-5，留空全部）</label><input class="cfg-input" id="cfg-mineru-page-range" type="text" value="${esc(mineru.page_range||'')}" /></div>
           <div class="toggle-field"><label>识别表格</label><label class="switch"><input id="cfg-mineru-table" type="checkbox"${mineru.enable_table?' checked':''} /><span class="slider"></span></label></div>
@@ -783,6 +784,27 @@ async function loadConfig() {
           <div class="toggle-field"><label>MinerU 失败回退本地</label><label class="switch"><input id="cfg-mineru-fallback" type="checkbox"${mineru.fallback_to_local?' checked':''} /><span class="slider"></span></label></div>
           <div class="field"><label>轮询超时（秒）</label><input class="cfg-input" id="cfg-mineru-timeout" type="number" value="${mineru.poll_timeout_sec??300}" /></div>
           <div class="field"><label>轮询间隔（秒）</label><input class="cfg-input" id="cfg-mineru-interval" type="number" value="${mineru.poll_interval_sec??3}" /></div>
+        </div>
+
+        <div class="settings-card">
+          <h3>词典工具密钥</h3>
+          <p style="font-size:.78rem;color:var(--muted);margin-bottom:.75rem">配置后无需编辑 .env 文件即可启用词典提供商</p>
+          <div class="field"><label>Merriam-Webster API Key</label>
+            <input class="cfg-input" id="cfg-dict-mw-key" type="password"
+              placeholder="${cfg.dict_providers?.merriam_webster_key ? '● 已配置（留空不修改）' : '未配置，输入后保存'}" />
+          </div>
+          <div class="field"><label>有道 App Key</label>
+            <input class="cfg-input" id="cfg-dict-youdao-key" type="password"
+              placeholder="${cfg.dict_providers?.youdao_app_key ? '● 已配置（留空不修改）' : '未配置，输入后保存'}" />
+          </div>
+          <div class="field"><label>有道 App Secret</label>
+            <input class="cfg-input" id="cfg-dict-youdao-secret" type="password"
+              placeholder="${cfg.dict_providers?.youdao_app_secret ? '● 已配置（留空不修改）' : '未配置，输入后保存'}" />
+          </div>
+          <div class="field"><label>ECDICT 路径（.db 或 .csv）</label>
+            <input class="cfg-input" id="cfg-dict-ecdict-path" type="text"
+              value="${esc(cfg.dict_providers?.ecdict_path||'')}" placeholder="/data/ecdict.db" />
+          </div>
         </div>
 
       </div>
@@ -843,18 +865,35 @@ async function saveConfig() {
       sharpen: g('cfg-sharpen').checked,
       fallback_to_tesseract: g('cfg-fallback').checked,
     },
-    mineru: {
-      enabled: g('cfg-mineru-enabled').checked,
-      api_base: g('cfg-mineru-api-base').value.trim(),
-      language: g('cfg-mineru-language').value.trim(),
-      page_range: g('cfg-mineru-page-range').value.trim() || null,
-      enable_table: g('cfg-mineru-table').checked,
-      enable_formula: g('cfg-mineru-formula').checked,
-      is_ocr: g('cfg-mineru-ocr').checked,
-      fallback_to_local: g('cfg-mineru-fallback').checked,
-      poll_timeout_sec: Number(g('cfg-mineru-timeout').value),
-      poll_interval_sec: Number(g('cfg-mineru-interval').value),
-    },
+    mineru: (() => {
+      const m = {
+        enabled: g('cfg-mineru-enabled').checked,
+        api_base: g('cfg-mineru-api-base').value.trim(),
+        language: g('cfg-mineru-language').value.trim(),
+        page_range: g('cfg-mineru-page-range').value.trim() || null,
+        enable_table: g('cfg-mineru-table').checked,
+        enable_formula: g('cfg-mineru-formula').checked,
+        is_ocr: g('cfg-mineru-ocr').checked,
+        fallback_to_local: g('cfg-mineru-fallback').checked,
+        poll_timeout_sec: Number(g('cfg-mineru-timeout').value),
+        poll_interval_sec: Number(g('cfg-mineru-interval').value),
+      };
+      const mk = g('cfg-mineru-api-key').value.trim();
+      if (mk) m.api_key = mk;
+      return m;
+    })(),
+    dict_providers: (() => {
+      const d = {};
+      const mwk = g('cfg-dict-mw-key').value.trim();
+      if (mwk) d.merriam_webster_key = mwk;
+      const ydk = g('cfg-dict-youdao-key').value.trim();
+      if (ydk) d.youdao_app_key = ydk;
+      const yds = g('cfg-dict-youdao-secret').value.trim();
+      if (yds) d.youdao_app_secret = yds;
+      const ep = g('cfg-dict-ecdict-path').value.trim();
+      if (ep !== '') d.ecdict_path = ep || null;
+      return d;
+    })(),
     text_cleaner: {
       enabled: g('cfg-text-cleaner-enabled').checked,
       backend: g('cfg-text-cleaner-backend').value,
