@@ -86,12 +86,22 @@ class RuntimeConfig(BaseModel):
     vocab_provider: str = settings.vocab_provider
     ai_model: str = settings.ai_model
     ai_batch_size: int = Field(settings.ai_batch_size, ge=1, le=50)
+    ai_prompt_caching: bool = settings.ai_prompt_caching
+    # LLM retry policy (applied to all providers)
+    llm_retry_attempts: int = Field(settings.llm_retry_attempts, ge=1, le=6)
+    llm_retry_initial_delay: float = Field(settings.llm_retry_initial_delay, ge=0.0, le=10.0)
+    llm_retry_max_delay: float = Field(settings.llm_retry_max_delay, ge=1.0, le=120.0)
+    # Prompt selection (affects vocab enrichment, rerank, text cleaner)
+    prompt_domain: str = settings.prompt_domain
+    prompt_version: str = settings.prompt_version
     registration_enabled: bool = True
     ocr_cache_enabled: bool = True
     text_cleaner: TextCleanerConfig = Field(default_factory=TextCleanerConfig)
     llm: LLMProviderConfig = Field(default_factory=LLMProviderConfig)
     # AI vocabulary pre-processing: spell-fix + re-rank before enrichment
     ai_preprocess_enabled: bool = False
+    # Automatic LLM fallback chain: if primary provider fails, try next LLM
+    llm_fallback_enabled: bool = True
 
 
 def _default_config() -> RuntimeConfig:
@@ -154,11 +164,33 @@ def frontend_config_payload() -> Dict[str, Any]:
     config = get_runtime_config()
     from backend.services.ocr_cache import cache_stats
     wordlist_count = 0
+    cefr_available_flag = False
     try:
-        from backend.services.wordlist_service import gaokao_word_count
+        from backend.services.wordlist_service import gaokao_word_count, cefr_available
         wordlist_count = gaokao_word_count()
+        cefr_available_flag = cefr_available()
     except Exception:
         pass
+
+    try:
+        from backend.prompts import available_prompts
+        prompt_catalog = available_prompts()
+    except Exception:
+        prompt_catalog = {}
+
+    try:
+        from backend.utils.model_registry import list_profiles
+        model_catalog = [
+            {
+                "name": p.name, "provider": p.provider, "tier": p.tier,
+                "batch_size": p.batch_size, "supports_prompt_cache": p.supports_prompt_cache,
+                "context_window": p.context_window,
+            }
+            for p in list_profiles()
+        ]
+    except Exception:
+        model_catalog = []
+
     return {
         "defaults": config.model_dump(),
         "ocr_capabilities": detect_ocr_capabilities(),
@@ -166,6 +198,9 @@ def frontend_config_payload() -> Dict[str, Any]:
         "ocr_cache_stats": cache_stats(),
         "text_cleaner_backends": ["none", "claude", "deepseek", "openai"],
         "gaokao_word_count": wordlist_count,
+        "cefr_available": cefr_available_flag,
+        "prompt_catalog": prompt_catalog,
+        "model_catalog": model_catalog,
     }
 
 

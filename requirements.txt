@@ -5,15 +5,20 @@ pydantic>=2.5.0
 pydantic-settings>=2.1.0
 spacy>=3.7.0
 nltk>=3.8.1
+# PDF extraction: PyMuPDF is primary (fast), pdfplumber is fallback (accurate tables)
+PyMuPDF>=1.24.0
 pdfplumber>=0.10.3
 python-docx>=1.1.0
 Pillow>=10.1.0
 pytesseract>=0.3.10
 rapidocr>=3.8.1
 onnxruntime>=1.24.4
+# Frequency scoring (Zipf) and CEFR classification
 wordfreq>=3.1.1
-PyMuPDF>=1.24.0
+cefrpy>=1.1.0
+# LLM SDKs
 anthropic>=0.40.0
+openai>=1.40.0
 openpyxl>=3.1.2
 aiofiles>=23.2.1
 python-dotenv>=1.0.0

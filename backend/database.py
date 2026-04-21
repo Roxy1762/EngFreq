@@ -123,6 +123,31 @@ def _ensure_schema_columns() -> None:
         conn.close()
 
 
+# Identifier allowlist for lightweight SQLite migrations.
+# SQLite doesn't support parameter binding for identifiers/DDL, so we validate
+# against a hard-coded set before interpolation rather than accepting arbitrary
+# strings.
+_ALLOWED_TABLES: frozenset[str] = frozenset({"exams", "users", "dicts", "app_settings"})
+_ALLOWED_COLUMN_DEFINITIONS: frozenset[str] = frozenset({
+    "TEXT", "TEXT NOT NULL", "TEXT NOT NULL DEFAULT 'local'",
+    "INTEGER", "INTEGER NOT NULL DEFAULT 0", "INTEGER NOT NULL DEFAULT 1",
+})
+
+
+def _is_safe_identifier(name: str) -> bool:
+    """Conservative: letters, digits, underscore only; must start with letter."""
+    if not name or not name[0].isalpha():
+        return False
+    return all(ch.isalnum() or ch == "_" for ch in name)
+
+
 def _add_col_if_missing(conn, table: str, existing_cols: set, col: str, definition: str) -> None:
-    if col not in existing_cols:
-        conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} {definition}")
+    if col in existing_cols:
+        return
+    if table not in _ALLOWED_TABLES:
+        raise ValueError(f"Refusing ALTER TABLE on unknown table: {table!r}")
+    if not _is_safe_identifier(col):
+        raise ValueError(f"Refusing ALTER TABLE with unsafe column name: {col!r}")
+    if definition not in _ALLOWED_COLUMN_DEFINITIONS:
+        raise ValueError(f"Refusing ALTER TABLE with unrecognized definition: {definition!r}")
+    conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} {definition}")

@@ -1,0 +1,43 @@
+services:
+  engfreq:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: engfreq:latest
+    container_name: engfreq
+    restart: unless-stopped
+    ports:
+      - "${HOST_PORT:-8000}:8000"
+    environment:
+      # Override in .env or here; falls back to sensible defaults
+      HOST: 0.0.0.0
+      PORT: 8000
+      ADMIN_USERNAME: ${ADMIN_USERNAME:-admin}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:-admin123}
+      AI_MODEL: ${AI_MODEL:-claude-opus-4-7}
+      AI_BATCH_SIZE: ${AI_BATCH_SIZE:-25}
+      AI_PROMPT_CACHING: ${AI_PROMPT_CACHING:-true}
+      VOCAB_PROVIDER: ${VOCAB_PROVIDER:-free_dict}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:-}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      PROMPT_DOMAIN: ${PROMPT_DOMAIN:-gaokao}
+      PROMPT_VERSION: ${PROMPT_VERSION:-v2}
+      LLM_RETRY_ATTEMPTS: ${LLM_RETRY_ATTEMPTS:-3}
+      MAX_UPLOAD_MB: ${MAX_UPLOAD_MB:-50}
+    volumes:
+      # Persist DB and user-generated files across container restarts
+      - engfreq-data:/app/data
+      - engfreq-db:/app/db
+    env_file:
+      - .env
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8000/healthz"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+
+volumes:
+  engfreq-data:
+  engfreq-db:

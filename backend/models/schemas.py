@@ -112,14 +112,18 @@ class VocabEntry(BaseModel):
     english_definition: Optional[str] = None
     example_sentence: Optional[str] = None
     notes: Optional[str] = None
+    collocations: Optional[str] = None     # "make an effort；spare no effort" (；-separated)
+    confusables: Optional[str] = None      # "affect (v.) vs effect (n.)"
     body_count: int = 0
     stem_count: int = 0
     option_count: int = 0
     total_count: int = 0
     score: float = 0.0
-    source: str = ""     # "claude" | "free_dict" | "merriam_webster" | "oxford"
-    word_level: Optional[str] = None  # "基础" | "高考" | "四六级" | "超纲"
-    selected: bool = True             # manual/AI selection flag
+    source: str = ""     # provider name (claude | deepseek | openai | free_dict | ...)
+    word_level: Optional[str] = None       # "基础" | "高考" | "四六级" | "超纲"
+    cefr_level: Optional[str] = None       # "A1" .. "C2"
+    zipf_score: Optional[float] = None     # 0–8 corpus-frequency score
+    selected: bool = True                  # manual/AI selection flag
     exam_sources: List[str] = Field(default_factory=list)  # exam codes contributing to this word
 
 
