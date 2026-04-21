@@ -109,6 +109,28 @@ _ASSETS_DIR = Path(__file__).parent.parent / "frontend" / "assets"
 _ASSETS_DIR.mkdir(parents=True, exist_ok=True)
 app.mount("/assets", StaticFiles(directory=str(_ASSETS_DIR)), name="assets")
 
+
+@app.get("/healthz", tags=["health"])
+async def healthz() -> dict:
+    """Lightweight liveness probe — no DB access, no external calls."""
+    return {"status": "ok", "version": app.version}
+
+
+@app.get("/readyz", tags=["health"])
+async def readyz() -> dict:
+    """Readiness probe: verifies the SQLite connection and runtime config load."""
+    try:
+        from backend.database import SessionLocal
+        with SessionLocal() as session:
+            session.execute(__import__("sqlalchemy").text("SELECT 1"))
+        from backend.services.runtime_config import get_runtime_config
+        get_runtime_config()
+        return {"status": "ready"}
+    except Exception as exc:   # noqa: BLE001
+        from fastapi import HTTPException
+        raise HTTPException(status_code=503, detail=f"not ready: {exc}") from exc
+
+
 # ── In-memory task store ──────────────────────────────────────────────────────
 _tasks: Dict[str, TaskStatus] = {}
 _task_texts: Dict[str, str] = {}

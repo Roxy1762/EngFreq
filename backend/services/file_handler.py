@@ -12,7 +12,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import logging
 from pathlib import Path
-from typing import Tuple
+from typing import Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -34,23 +34,54 @@ def _extract_txt(path: Path) -> str:
     return path.read_text(errors="replace")
 
 
-def _extract_pdf(path: Path) -> Tuple[str, bool]:
-    """Returns (text, used_ocr)."""
+def _extract_pdf_pymupdf(path: Path) -> Optional[Tuple[str, int]]:
+    """Primary PDF extractor. Returns (text, total_chars) or None if unavailable."""
+    try:
+        import fitz   # PyMuPDF
+    except ImportError:
+        return None
+    try:
+        pages_text: list[str] = []
+        total_chars = 0
+        with fitz.open(str(path)) as doc:
+            for page in doc:
+                t = page.get_text("text") or ""
+                pages_text.append(t)
+                total_chars += len(t.strip())
+        return "\n".join(pages_text), total_chars
+    except Exception as exc:   # noqa: BLE001
+        logger.warning("PyMuPDF extraction failed for %s: %s — falling back to pdfplumber", path.name, exc)
+        return None
+
+
+def _extract_pdf_pdfplumber(path: Path) -> Tuple[str, int]:
+    """Fallback PDF extractor — more accurate for tables, slower overall."""
     try:
         import pdfplumber
-    except ImportError:
-        raise RuntimeError("pdfplumber not installed. Run: pip install pdfplumber")
+    except ImportError as exc:
+        raise RuntimeError("No PDF extractor installed. Run: pip install PyMuPDF pdfplumber") from exc
 
     pages_text: list[str] = []
     total_chars = 0
-
     with pdfplumber.open(str(path)) as pdf:
         for page in pdf.pages:
             t = page.extract_text() or ""
             pages_text.append(t)
             total_chars += len(t.strip())
+    return "\n".join(pages_text), total_chars
 
-    full_text = "\n".join(pages_text)
+
+def _extract_pdf(path: Path) -> Tuple[str, bool]:
+    """
+    Extract text from a PDF. Tries PyMuPDF first (10x+ faster), falls back to
+    pdfplumber, finally OCR if the PDF appears scanned.
+
+    Returns (text, used_ocr).
+    """
+    result = _extract_pdf_pymupdf(path)
+    if result is None:
+        result = _extract_pdf_pdfplumber(path)
+    full_text, total_chars = result
 
     # Use configurable threshold to decide if PDF is scanned
     try:
@@ -60,7 +91,10 @@ def _extract_pdf(path: Path) -> Tuple[str, bool]:
         threshold = 50
 
     if total_chars < threshold:
-        logger.info("PDF appears to be scanned (chars=%d < threshold=%d) — falling back to OCR", total_chars, threshold)
+        logger.info(
+            "PDF appears to be scanned (chars=%d < threshold=%d) — falling back to OCR",
+            total_chars, threshold,
+        )
         from backend.services.ocr_service import ocr_pdf
         return ocr_pdf(path), True
 

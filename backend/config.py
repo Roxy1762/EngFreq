@@ -26,8 +26,10 @@ class Settings(BaseSettings):
 
     # ── Anthropic Claude ──────────────────────────────────────────────────────
     anthropic_api_key: Optional[str] = None
-    ai_model: str = "claude-opus-4-6"
-    ai_batch_size: int = 20
+    # Default to Opus 4.7 (current Anthropic flagship as of 2026)
+    ai_model: str = "claude-opus-4-7"
+    ai_batch_size: int = 25
+    ai_prompt_caching: bool = True   # cache the long system prompt across calls
 
     # ── DeepSeek ──────────────────────────────────────────────────────────────
     deepseek_api_key: Optional[str] = None
@@ -70,8 +72,21 @@ class Settings(BaseSettings):
     ocr_cache_dir: str = "data/ocr_cache"
     file_store_dir: str = "data/files"      # Persistent copies of uploaded files
 
-    # ── Text cleaner ─────────────────────────────────────────────────────────
+    # ── Text cleaner ──────────────────────────────────────────────────────────
     text_cleaner_backend: str = "none"      # none | claude | deepseek | openai
+
+    # ── LLM retry policy ──────────────────────────────────────────────────────
+    llm_retry_attempts: int = 3
+    llm_retry_initial_delay: float = 1.5    # seconds
+    llm_retry_max_delay: float = 20.0
+
+    # ── Prompt domain (vocab enrichment) ──────────────────────────────────────
+    # gaokao | ielts | cet — selects which prompt family is used by default.
+    prompt_domain: str = "gaokao"
+    prompt_version: str = "v2"
+
+    # ── Upload limits ─────────────────────────────────────────────────────────
+    max_upload_mb: int = 50                 # reject uploads larger than this
 
     model_config = {
         "env_file": ".env",

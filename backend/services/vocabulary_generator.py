@@ -2,22 +2,25 @@
 Vocabulary generator — selects the configured provider and drives enrichment.
 
 Pipeline:
-  1. Sort lemmas by learning priority
+  1. Sort lemmas by learning priority (exam score + rarity + option weight)
   2. [Optional] AI preprocess: fix OCR spelling errors + re-rank by exam importance
   3. Enrich top-N with definitions/examples via the configured provider
+  4. Tag word levels (基础/高考/四六级/超纲) and CEFR levels (A1-C2)
+  5. If the chosen LLM provider fails, automatically fall back to the next one
 """
 from __future__ import annotations
 
 import json
 import logging
-import textwrap
-from typing import List
+from typing import List, Optional
 
-from backend.config import settings
 from backend.models.schemas import LemmaEntry, VocabEntry
+from backend.prompts import get_prompt
 from backend.providers.base_provider import BaseVocabProvider
 from backend.services.basic_vocab import zipf_score
 from backend.services.runtime_config import get_runtime_config
+from backend.utils.json_parse import parse_json_object
+from backend.utils.llm_client import chat, is_llm_provider, resolve_active_llm
 
 logger = logging.getLogger(__name__)
 
@@ -27,82 +30,32 @@ logger = logging.getLogger(__name__)
 def _build_registry() -> dict[str, type[BaseVocabProvider]]:
     registry: dict[str, type] = {}
 
-    try:
-        from backend.providers.claude_provider import ClaudeProvider
-        registry["claude"] = ClaudeProvider
-    except Exception as e:
-        logger.debug(f"ClaudeProvider unavailable: {e}")
-
-    try:
-        from backend.providers.deepseek_provider import DeepSeekProvider
-        registry["deepseek"] = DeepSeekProvider
-    except Exception as e:
-        logger.debug(f"DeepSeekProvider unavailable: {e}")
-
-    try:
-        from backend.providers.openai_compatible_provider import OpenAICompatibleProvider
-        registry["openai"] = OpenAICompatibleProvider
-    except Exception as e:
-        logger.debug(f"OpenAICompatibleProvider unavailable: {e}")
-
-    try:
-        from backend.providers.free_dict_provider import FreeDictProvider
-        registry["free_dict"] = FreeDictProvider
-    except Exception as e:
-        logger.debug(f"FreeDictProvider unavailable: {e}")
-
-    try:
-        from backend.providers.merriam_webster_provider import MerriamWebsterProvider
-        registry["merriam_webster"] = MerriamWebsterProvider
-    except Exception as e:
-        logger.debug(f"MerriamWebsterProvider unavailable: {e}")
-
-    try:
-        from backend.providers.youdao_provider import YoudaoProvider
-        registry["youdao"] = YoudaoProvider
-    except Exception as e:
-        logger.debug(f"YoudaoProvider unavailable: {e}")
-
-    try:
-        from backend.providers.ecdict_provider import ECDICTProvider
-        registry["ecdict"] = ECDICTProvider
-    except Exception as e:
-        logger.debug(f"ECDICTProvider unavailable: {e}")
+    _try_register(registry, "claude",          "backend.providers.claude_provider",             "ClaudeProvider")
+    _try_register(registry, "deepseek",        "backend.providers.deepseek_provider",           "DeepSeekProvider")
+    _try_register(registry, "openai",          "backend.providers.openai_compatible_provider",  "OpenAICompatibleProvider")
+    _try_register(registry, "free_dict",       "backend.providers.free_dict_provider",          "FreeDictProvider")
+    _try_register(registry, "merriam_webster", "backend.providers.merriam_webster_provider",    "MerriamWebsterProvider")
+    _try_register(registry, "youdao",          "backend.providers.youdao_provider",             "YoudaoProvider")
+    _try_register(registry, "ecdict",          "backend.providers.ecdict_provider",             "ECDICTProvider")
 
     return registry
+
+
+def _try_register(registry: dict, key: str, module: str, cls: str) -> None:
+    try:
+        mod = __import__(module, fromlist=[cls])
+        registry[key] = getattr(mod, cls)
+    except Exception as e:   # noqa: BLE001
+        logger.debug("%s unavailable: %s", cls, e)
 
 
 _REGISTRY = _build_registry()
 
 
-# ── AI pre-processing prompt ──────────────────────────────────────────────────
-
-_RERANK_SYSTEM = textwrap.dedent("""
-    You are a 高考 (Chinese college entrance exam) English vocabulary expert.
-
-    You will receive a list of English words extracted from an exam paper via NLP,
-    possibly containing OCR spelling errors or irrelevant fragments.
-
-    Your tasks:
-    1. CORRECT obvious OCR spelling errors (e.g. "becorne"→"become", "irnportant"→"important",
-       "cornplete"→"complete", "sornething"→"something"). Use context (exam vocabulary) to decide.
-    2. REMOVE entries that are clearly invalid: gibberish, single stray letters, numbers,
-       punctuation fragments, or words that cannot exist in English.
-    3. RE-RANK the cleaned list by exam study priority:
-       - First: 高考核心词汇 (core 高考 vocab) — unfamiliar but highly testable words
-       - Second: 超纲词汇 appearing frequently in this exam (worth noting)
-       - Last: 基础词汇 (basic words everyone knows: the, go, big, year, make, good)
-    4. Return at most the requested number of words.
-
-    Return ONLY a valid JSON object — no markdown, no prose:
-    {
-      "words": ["corrected_word1", "corrected_word2", ...],
-      "corrections": {"original": "corrected", ...}
-    }
-
-    The "corrections" map is optional — only include genuinely corrected spellings.
-    The "words" array is the final ordered list (most important first).
-""").strip()
+# ── Provider fallback chain ───────────────────────────────────────────────────
+# If the user's chosen provider is an LLM and fails, we try the next configured
+# LLM, then drop back to free_dict (no API key needed).
+_LLM_FALLBACK_ORDER = ("claude", "deepseek", "openai")
 
 
 # ── Public API ────────────────────────────────────────────────────────────────
@@ -123,22 +76,26 @@ def _learning_priority(entry: LemmaEntry) -> tuple[float, float, float, float]:
 async def ai_preprocess_lemmas(
     lemma_table: List[LemmaEntry],
     top_n: int = 50,
-    provider_name: str | None = None,
+    provider_name: Optional[str] = None,
 ) -> List[LemmaEntry]:
     """
     Optional AI pipeline step: fix OCR spelling errors and re-rank lemmas
     by 高考 exam importance before vocabulary enrichment.
 
     Returns a corrected, re-ranked list of at most *top_n* lemmas.
-    Falls back to the original priority sort if AI call fails.
+    Falls back to the deterministic priority sort if AI call fails.
     """
     runtime = get_runtime_config()
     pname = provider_name or runtime.vocab_provider
 
-    # We feed 3× top_n candidates so AI has room to select and re-rank
+    # Feed 3× top_n candidates so the AI has room to select and re-rank
     sorted_lemmas = sorted(lemma_table, key=_learning_priority, reverse=True)
     pool_size = min(len(sorted_lemmas), top_n * 3)
     candidates = sorted_lemmas[:pool_size]
+
+    if not is_llm_provider(pname):
+        logger.info("AI preprocess: provider '%s' is not an LLM, skipping rerank", pname)
+        return sorted_lemmas[:top_n]
 
     word_list = [
         {
@@ -150,127 +107,143 @@ async def ai_preprocess_lemmas(
         }
         for e in candidates
     ]
-
     user_msg = (
         f"Requested output size: {top_n} words\n\n"
         f"Word list from exam ({len(word_list)} candidates):\n"
         f"{json.dumps(word_list, ensure_ascii=False, indent=2)}"
     )
+    system_prompt = get_prompt("rerank", domain="gaokao", version="v2")
 
-    raw_response = None
     try:
-        llm = runtime.llm
-        if pname == "claude" and llm.anthropic_api_key:
-            import anthropic
-            client = anthropic.AsyncAnthropic(api_key=llm.anthropic_api_key)
-            resp = await client.messages.create(
-                model=runtime.ai_model,
-                max_tokens=2048,
-                system=_RERANK_SYSTEM,
-                messages=[{"role": "user", "content": user_msg}],
-            )
-            raw_response = resp.content[0].text.strip()
-
-        elif pname in ("deepseek", "openai"):
-            try:
-                from openai import AsyncOpenAI
-            except ImportError:
-                raise RuntimeError("openai package not installed")
-            if pname == "deepseek" and llm.deepseek_api_key:
-                client = AsyncOpenAI(api_key=llm.deepseek_api_key, base_url=llm.deepseek_base_url)
-                model = llm.deepseek_model
-            elif pname == "openai" and llm.openai_api_key:
-                kwargs: dict = {"api_key": llm.openai_api_key}
-                if llm.openai_base_url:
-                    kwargs["base_url"] = llm.openai_base_url
-                client = AsyncOpenAI(**kwargs)
-                model = llm.openai_model
-            else:
-                raise RuntimeError(f"No API key configured for provider '{pname}'")
-            resp = await client.chat.completions.create(
-                model=model,
-                messages=[
-                    {"role": "system", "content": _RERANK_SYSTEM},
-                    {"role": "user", "content": user_msg},
-                ],
-                max_tokens=2048,
-                temperature=0.2,
-            )
-            raw_response = resp.choices[0].message.content.strip()
-
-        else:
-            logger.info("AI preprocess: provider '%s' not available, skipping rerank", pname)
-            return sorted_lemmas[:top_n]
-
-    except Exception as exc:
-        logger.warning("AI preprocess failed (%s), using priority sort: %s", pname, exc)
+        provider, model = resolve_active_llm(pname)
+        response = await chat(
+            provider=provider,
+            model=model,
+            system=system_prompt,
+            user=user_msg,
+            max_tokens=2048,
+            temperature=0.2,
+            use_prompt_cache=True,
+            label=f"{provider}-rerank:{len(word_list)}w",
+        )
+    except Exception as exc:   # noqa: BLE001
+        logger.warning("AI preprocess failed (%s): %s — using priority sort", pname, exc)
         return sorted_lemmas[:top_n]
 
-    # Parse AI response
-    try:
-        if raw_response.startswith("```"):
-            raw_response = raw_response.split("```", 2)[1]
-            if raw_response.startswith("json"):
-                raw_response = raw_response[4:]
-            raw_response = raw_response.rsplit("```", 1)[0].strip()
+    data = parse_json_object(response.text)
+    ai_words = data.get("words", []) if isinstance(data, dict) else []
+    corrections = data.get("corrections", {}) if isinstance(data, dict) else {}
 
-        data = json.loads(raw_response)
-        ai_words: list[str] = data.get("words", [])
-        corrections: dict[str, str] = data.get("corrections", {})
+    if not ai_words:
+        logger.warning("AI preprocess returned empty word list, falling back")
+        return sorted_lemmas[:top_n]
 
-        if not ai_words:
-            logger.warning("AI preprocess returned empty word list, falling back")
-            return sorted_lemmas[:top_n]
+    # Build lookup from original lemma → LemmaEntry
+    lemma_map = {e.lemma: e for e in candidates}
+    corrected_map: dict[str, LemmaEntry] = {}
 
-        # Build lookup from original lemma → LemmaEntry
-        lemma_map = {e.lemma: e for e in candidates}
+    for orig, corrected in (corrections or {}).items():
+        if orig in lemma_map and isinstance(corrected, str) and corrected:
+            base = lemma_map[orig]
+            corrected_map[corrected] = LemmaEntry(
+                lemma=corrected,
+                pos=base.pos,
+                family_id=base.family_id,
+                surface_forms=base.surface_forms,
+                body_count=base.body_count,
+                stem_count=base.stem_count,
+                option_count=base.option_count,
+                total_count=base.total_count,
+                score=base.score,
+            )
+            logger.info("AI corrected spelling: '%s' → '%s'", orig, corrected)
 
-        # Apply corrections: update lemma field in entries
-        corrected_map: dict[str, LemmaEntry] = {}
-        for orig, corrected in corrections.items():
-            if orig in lemma_map:
-                entry = lemma_map[orig]
-                # Create a new entry with corrected lemma
-                updated = LemmaEntry(
-                    lemma=corrected,
-                    pos=entry.pos,
-                    family_id=entry.family_id,
-                    surface_forms=entry.surface_forms,
-                    body_count=entry.body_count,
-                    stem_count=entry.stem_count,
-                    option_count=entry.option_count,
-                    total_count=entry.total_count,
-                    score=entry.score,
-                )
-                corrected_map[corrected] = updated
-                logger.info("AI corrected spelling: '%s' → '%s'", orig, corrected)
+    result: List[LemmaEntry] = []
+    for word in ai_words[:top_n]:
+        if not isinstance(word, str):
+            continue
+        if word in corrected_map:
+            result.append(corrected_map[word])
+        elif word in lemma_map:
+            result.append(lemma_map[word])
+        # unknown word → model hallucination, skip
 
-        # Build result in AI-specified order
-        result: List[LemmaEntry] = []
-        for word in ai_words[:top_n]:
-            if word in corrected_map:
-                result.append(corrected_map[word])
-            elif word in lemma_map:
-                result.append(lemma_map[word])
-            # skip unknown words (AI hallucinations)
+    logger.info(
+        "AI preprocess: %d candidates → %d selected, %d corrections",
+        len(candidates), len(result), len(corrections),
+    )
+    return result or sorted_lemmas[:top_n]
+
+
+# ── Fallback chain helpers ────────────────────────────────────────────────────
+
+def _build_fallback_chain(primary: str) -> list[str]:
+    """Given a primary provider, construct a sensible fallback chain."""
+    chain: list[str] = [primary]
+
+    runtime = get_runtime_config()
+    llm = runtime.llm
+
+    # Only enqueue providers that are actually configured (key present)
+    configured = []
+    if llm.anthropic_api_key:
+        configured.append("claude")
+    if llm.deepseek_api_key:
+        configured.append("deepseek")
+    if llm.openai_api_key:
+        configured.append("openai")
+
+    for name in _LLM_FALLBACK_ORDER:
+        if name != primary and name in configured and name in _REGISTRY:
+            chain.append(name)
+
+    if "free_dict" in _REGISTRY and "free_dict" not in chain:
+        chain.append("free_dict")      # always-available last resort
+
+    return chain
+
+
+async def _enrich_with_chain(
+    provider_chain: list[str],
+    lemmas: List[LemmaEntry],
+    context_text: str,
+) -> tuple[List[VocabEntry], str]:
+    """Walk the fallback chain until one provider succeeds."""
+    last_exc: Optional[Exception] = None
+    for name in provider_chain:
+        if name not in _REGISTRY:
+            continue
+        try:
+            provider: BaseVocabProvider = _REGISTRY[name]()
+        except Exception as exc:   # noqa: BLE001
+            logger.info("Provider '%s' unavailable (%s), trying next", name, exc)
+            last_exc = exc
+            continue
 
         logger.info(
-            "AI preprocess: %d candidates → %d selected, %d corrections",
-            len(candidates), len(result), len(corrections),
+            "Generating vocabulary for %d words via '%s'",
+            len(lemmas), name,
         )
-        return result
+        try:
+            vocab = await provider.enrich(lemmas, context_text=context_text)
+            if vocab:
+                return vocab, name
+            logger.warning("Provider '%s' returned empty vocab list, trying next", name)
+        except Exception as exc:   # noqa: BLE001
+            logger.warning("Provider '%s' raised %s, trying fallback", name, exc)
+            last_exc = exc
 
-    except (json.JSONDecodeError, KeyError) as exc:
-        logger.warning("AI preprocess response parse error (%s), falling back: %s", exc, raw_response[:200])
-        return sorted_lemmas[:top_n]
+    if last_exc:
+        raise RuntimeError(f"All providers in chain {provider_chain} failed") from last_exc
+    raise RuntimeError(f"No working provider in chain: {provider_chain}")
 
 
 async def generate_vocabulary(
     lemma_table: List[LemmaEntry],
     context_text: str = "",
     top_n: int = 50,
-    provider_name: str | None = None,
-    ai_preprocess: bool | None = None,
+    provider_name: Optional[str] = None,
+    ai_preprocess: Optional[bool] = None,
 ) -> List[VocabEntry]:
     """
     Enrich the top-*top_n* lemmas with definitions and Chinese translations.
@@ -278,55 +251,38 @@ async def generate_vocabulary(
     Pipeline:
     1. Sort by learning priority
     2. [Optional] AI preprocess: fix OCR errors + re-rank by exam importance
-    3. Enrich via the configured vocabulary provider
-
-    Args:
-        lemma_table:   Full lemma table from frequency analysis.
-        context_text:  Raw exam text for example sentence generation.
-        top_n:         How many words to enrich.
-        provider_name: Override the default provider from config.
-        ai_preprocess: Whether to run AI re-ranking step. None = use runtime config.
-
-    Returns:
-        List of VocabEntry sorted by learning priority descending.
+    3. Enrich via the chosen provider (with automatic fallback on failure)
+    4. Tag word levels + CEFR + Zipf score
     """
     runtime = get_runtime_config()
     pname = provider_name or runtime.vocab_provider
 
-    # Determine whether to run AI preprocessing
     should_preprocess = ai_preprocess
     if should_preprocess is None:
         should_preprocess = getattr(runtime, "ai_preprocess_enabled", False)
 
-    if should_preprocess:
+    if should_preprocess and is_llm_provider(pname):
         logger.info("Running AI vocabulary pre-processing (rerank + spell-fix)…")
         candidates = await ai_preprocess_lemmas(lemma_table, top_n=top_n, provider_name=pname)
     else:
-        sorted_lemmas = sorted(lemma_table, key=_learning_priority, reverse=True)
-        candidates = sorted_lemmas[:top_n]
+        candidates = sorted(lemma_table, key=_learning_priority, reverse=True)[:top_n]
 
     if pname not in _REGISTRY:
         logger.warning(
-            f"Provider '{pname}' not in registry ({list(_REGISTRY.keys())}). "
-            f"Falling back to free_dict."
+            "Provider '%s' not in registry (%s). Falling back to free_dict.",
+            pname, list(_REGISTRY.keys()),
         )
         pname = "free_dict"
 
-    try:
-        provider: BaseVocabProvider = _REGISTRY[pname]()
-    except Exception as e:
-        raise RuntimeError(f"Cannot instantiate provider '{pname}': {e}") from e
+    chain = _build_fallback_chain(pname)
+    logger.info("Vocabulary provider chain: %s", chain)
 
-    logger.info(f"Generating vocabulary for {len(candidates)} words via '{pname}'")
+    vocab, used = await _enrich_with_chain(chain, candidates, context_text)
+    if used != pname:
+        logger.warning("Primary provider '%s' failed — used fallback '%s'", pname, used)
 
-    vocab = await provider.enrich(candidates, context_text=context_text)
-
-    # Tag word levels if not already set by provider
-    try:
-        from backend.services.wordlist_service import tag_vocab_entries
-        tag_vocab_entries(vocab)
-    except Exception as _e:
-        logger.debug("Word level tagging skipped: %s", _e)
+    # Enrich metadata: word_level, cefr_level, zipf_score
+    _tag_metadata(vocab)
 
     vocab.sort(
         key=lambda v: (
@@ -347,3 +303,25 @@ async def generate_vocabulary(
         reverse=True,
     )
     return vocab
+
+
+def _tag_metadata(vocab: List[VocabEntry]) -> None:
+    """Populate zipf_score, word_level, cefr_level (if missing)."""
+    try:
+        from backend.services.wordlist_service import tag_vocab_entries
+        tag_vocab_entries(vocab)
+    except Exception as exc:   # noqa: BLE001
+        logger.debug("Word level tagging skipped: %s", exc)
+
+    for entry in vocab:
+        target = (entry.headword or entry.lemma or "").strip().lower()
+        if not target:
+            continue
+        if entry.zipf_score is None:
+            entry.zipf_score = round(zipf_score(target), 2)
+        if not entry.cefr_level:
+            try:
+                from backend.services.wordlist_service import get_cefr_level
+                entry.cefr_level = get_cefr_level(target)
+            except Exception as exc:   # noqa: BLE001
+                logger.debug("CEFR tagging skipped for %s: %s", target, exc)

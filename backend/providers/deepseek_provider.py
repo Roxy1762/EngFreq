@@ -1,147 +1,72 @@
 """
 DeepSeek vocabulary provider.
 
-Uses the DeepSeek API (OpenAI-compatible format) to enrich words with
-Chinese meanings, definitions, and example sentences.
-
-Requires: DEEPSEEK_API_KEY in environment / .env
+Uses the DeepSeek API (OpenAI-compatible) via the unified `llm_client.chat()`.
 """
 from __future__ import annotations
 
 import json
 import logging
-import textwrap
 from typing import List
 
-from backend.config import settings
 from backend.models.schemas import LemmaEntry, VocabEntry
+from backend.prompts import get_prompt
 from backend.providers.base_provider import BaseVocabProvider
+from backend.providers.claude_provider import _build_entries, _fallback_entry
 from backend.services.runtime_config import get_runtime_config
+from backend.utils.json_parse import parse_json_array
+from backend.utils.llm_client import chat
+from backend.utils.model_registry import recommended_batch_size
 
 logger = logging.getLogger(__name__)
-
-_SYSTEM_PROMPT = textwrap.dedent("""
-    You are an expert English lexicographer and EFL teacher.
-    Given a list of English words found in a Chinese high-school exam paper,
-    produce a vocabulary reference for Chinese students.
-
-    Return ONLY a valid JSON array — no prose, no markdown fences.
-    Each element must conform exactly to this schema:
-    {
-      "headword": "<the word as given>",
-      "pos": "<noun|verb|adj|adv|phrase|other>",
-      "chinese_meaning": "<concise Chinese translation, separate senses with ；>",
-      "english_definition": "<one-sentence English definition>",
-      "example_sentence": "<one natural example sentence — prefer exam context if provided>",
-      "notes": "<optional: common collocations, confusable words, or usage tips — empty string if none>"
-    }
-    If a word appears in the exam context, prefer drawing the example from there.
-    Respond with exactly as many objects as words given.
-""").strip()
 
 
 class DeepSeekProvider(BaseVocabProvider):
     name = "deepseek"
 
-    def __init__(self):
+    def __init__(self, *, domain: str = "gaokao", prompt_version: str = "v2"):
         runtime = get_runtime_config()
-        llm = runtime.llm
-        try:
-            from openai import AsyncOpenAI
-        except ImportError:
-            raise RuntimeError("openai package not installed: pip install openai")
-
-        api_key = llm.deepseek_api_key
-        if not api_key:
+        if not runtime.llm.deepseek_api_key:
             raise RuntimeError("DEEPSEEK_API_KEY not configured")
-
-        self._client = AsyncOpenAI(
-            api_key=api_key,
-            base_url=llm.deepseek_base_url,
-        )
-        self._model = llm.deepseek_model
-        self._batch_size = runtime.ai_batch_size
+        self._model = runtime.llm.deepseek_model
+        self._batch_size = recommended_batch_size(self._model, runtime.ai_batch_size)
+        self._system_prompt = get_prompt("vocab_enrich", domain=domain, version=prompt_version)
 
     async def enrich(self, entries: List[LemmaEntry], context_text: str = "") -> List[VocabEntry]:
         results: List[VocabEntry] = []
-        batch_size = self._batch_size
-
-        for i in range(0, len(entries), batch_size):
-            batch = entries[i : i + batch_size]
+        for i in range(0, len(entries), self._batch_size):
+            batch = entries[i : i + self._batch_size]
             results.extend(await self._enrich_batch(batch, context_text))
-
         return results
 
     async def _enrich_batch(self, batch: List[LemmaEntry], context_text: str) -> List[VocabEntry]:
         words = [e.lemma for e in batch]
         context_snippet = context_text[:3000] if context_text else ""
 
-        user_content = f"Words: {json.dumps(words, ensure_ascii=False)}"
+        user_content = (
+            f"Words to enrich ({len(words)} total):\n"
+            f"{json.dumps(words, ensure_ascii=False, indent=2)}"
+        )
         if context_snippet:
-            user_content += f"\n\nExam context (excerpt):\n{context_snippet}"
+            user_content += f"\n\n--- 试卷原文节选 ---\n{context_snippet}\n---"
 
         try:
-            response = await self._client.chat.completions.create(
+            response = await chat(
+                provider="deepseek",
                 model=self._model,
-                messages=[
-                    {"role": "system", "content": _SYSTEM_PROMPT},
-                    {"role": "user", "content": user_content},
-                ],
+                system=self._system_prompt,
+                user=user_content,
                 max_tokens=4096,
                 temperature=0.3,
+                label=f"deepseek-vocab:{len(words)}w",
             )
-            raw = response.choices[0].message.content.strip()
-            # Strip markdown fences if present
-            if raw.startswith("```"):
-                raw = raw.split("```")[1]
-                if raw.startswith("json"):
-                    raw = raw[4:]
-            data = json.loads(raw)
-        except json.JSONDecodeError as e:
-            logger.error("DeepSeek returned invalid JSON: %s", e)
-            return [self._fallback(entry) for entry in batch]
-        except Exception as e:
-            logger.error("DeepSeek API error: %s", e)
-            return [self._fallback(entry) for entry in batch]
+        except Exception as exc:   # noqa: BLE001
+            logger.error("DeepSeek enrichment batch failed: %s", exc)
+            return [_fallback_entry(e, source="deepseek_error") for e in batch]
 
-        entry_map = {e.lemma: e for e in batch}
-        vocab_entries: List[VocabEntry] = []
+        data = parse_json_array(response.text)
+        if not data:
+            logger.error("DeepSeek returned unparseable output (len=%d)", len(response.text))
+            return [_fallback_entry(e, source="deepseek_error") for e in batch]
 
-        for item in data:
-            hw = item.get("headword", "")
-            base = entry_map.get(hw)
-            vocab_entries.append(
-                VocabEntry(
-                    headword=hw,
-                    lemma=hw,
-                    family=base.family_id if base else None,
-                    pos=item.get("pos", ""),
-                    chinese_meaning=item.get("chinese_meaning", ""),
-                    english_definition=item.get("english_definition", ""),
-                    example_sentence=item.get("example_sentence", ""),
-                    notes=item.get("notes", ""),
-                    body_count=base.body_count if base else 0,
-                    stem_count=base.stem_count if base else 0,
-                    option_count=base.option_count if base else 0,
-                    total_count=base.total_count if base else 0,
-                    score=base.score if base else 0.0,
-                    source=self.name,
-                )
-            )
-
-        return vocab_entries
-
-    @staticmethod
-    def _fallback(entry: LemmaEntry) -> VocabEntry:
-        return VocabEntry(
-            headword=entry.lemma,
-            lemma=entry.lemma,
-            family=entry.family_id,
-            pos=entry.pos,
-            body_count=entry.body_count,
-            stem_count=entry.stem_count,
-            option_count=entry.option_count,
-            total_count=entry.total_count,
-            score=entry.score,
-            source="deepseek_error",
-        )
+        return _build_entries(data, batch, source=self.name)
