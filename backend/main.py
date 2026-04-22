@@ -36,7 +36,7 @@ import logging
 import os
 import uuid
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Optional
 
 from fastapi import BackgroundTasks, Depends, FastAPI, File, Form, HTTPException, Query, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
@@ -75,15 +75,31 @@ from backend.services.frequency_analyzer import analyse
 from backend.services.runtime_config import frontend_config_payload, get_runtime_config, save_runtime_config
 from backend.services.structure_recognizer import recognize_structure
 from backend.services.vocabulary_generator import available_providers, generate_vocabulary
+from backend.utils.rate_limit import SlidingWindowLimiter
+from backend.utils.security import SecurityHeadersMiddleware, client_identifier, sanitize_filename
+from backend.utils.task_store import TaskStore
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s — %(message)s")
 logger = logging.getLogger(__name__)
+
+# ── Tunables (previously magic numbers scattered through the file) ──────────
+OCR_TEST_PREVIEW_CHARS = 2000
+COMBINE_EXAMS_FILENAME_CAP = 3
+EXPORT_FILENAME_TASK_SLICE = 8
+MAX_UNIQUE_CODE_ATTEMPTS = 20
+
+# Admin list endpoints default/upper bounds for pagination.
+ADMIN_LIST_DEFAULT_LIMIT = 100
+ADMIN_LIST_MAX_LIMIT = 500
 
 # ── Bootstrap DB + default admin ─────────────────────────────────────────────
 init_db()
 
 _ADMIN_USER = os.environ.get("ADMIN_USERNAME", "admin")
 _ADMIN_PASS = os.environ.get("ADMIN_PASSWORD", "admin123")
+_ADMIN_PASS_IS_DEFAULT = (
+    "ADMIN_PASSWORD" not in os.environ or _ADMIN_PASS == "admin123"
+)
 
 
 def _ensure_admin() -> None:
@@ -92,9 +108,18 @@ def _ensure_admin() -> None:
         if not db.query(User).filter_by(username=_ADMIN_USER).first():
             db.add(User(username=_ADMIN_USER, password_hash=hash_password(_ADMIN_PASS), is_admin=True))
             db.commit()
+            if _ADMIN_PASS_IS_DEFAULT:
+                logger.warning(
+                    "Default admin '%s' created with the built-in fallback password. "
+                    "Set ADMIN_PASSWORD in the environment and restart — never run this way in production.",
+                    _ADMIN_USER,
+                )
+            else:
+                logger.info("Admin account '%s' created from ADMIN_PASSWORD env var.", _ADMIN_USER)
+        elif _ADMIN_PASS_IS_DEFAULT:
             logger.warning(
-                "Default admin created — username: %s  password: %s  ← change in production!",
-                _ADMIN_USER, _ADMIN_PASS,
+                "ADMIN_PASSWORD is unset or still the built-in default. "
+                "Anyone who can reach this service can log in — rotate via the admin panel."
             )
     finally:
         db.close()
@@ -104,10 +129,68 @@ _ensure_admin()
 
 # ── FastAPI app ───────────────────────────────────────────────────────────────
 app = FastAPI(title="English Exam Word Analyzer", version="2.0.0")
-app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
+
+_cors_origins = settings.cors_origins_list
+_cors_allow_credentials = _cors_origins != ["*"]
+if _cors_origins == ["*"]:
+    logger.warning(
+        "CORS is configured with the wildcard origin. Set CORS_ALLOW_ORIGINS to a "
+        "comma-separated list of domains before exposing the service publicly."
+    )
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=_cors_origins,
+    allow_methods=["*"],
+    allow_headers=["*"],
+    allow_credentials=_cors_allow_credentials,
+)
+if settings.security_headers_enabled:
+    app.add_middleware(
+        SecurityHeadersMiddleware,
+        enable_hsts=settings.hsts_enabled,
+    )
+
+# ── Rate limiting (auth endpoints) ────────────────────────────────────────────
+_auth_limiter = SlidingWindowLimiter(
+    max_hits=settings.auth_rate_limit_attempts,
+    window_seconds=settings.auth_rate_limit_window_seconds,
+)
+
+
+def _enforce_rate_limit(request: Request, bucket: str) -> None:
+    key = f"{bucket}:{client_identifier(request)}"
+    if not _auth_limiter.check(key):
+        retry = int(_auth_limiter.retry_after(key)) + 1
+        raise HTTPException(
+            status_code=429,
+            detail="请求过于频繁，请稍后再试",
+            headers={"Retry-After": str(retry)},
+        )
+
+
 _ASSETS_DIR = Path(__file__).parent.parent / "frontend" / "assets"
 _ASSETS_DIR.mkdir(parents=True, exist_ok=True)
 app.mount("/assets", StaticFiles(directory=str(_ASSETS_DIR)), name="assets")
+
+
+@app.on_event("shutdown")
+async def _graceful_shutdown() -> None:
+    """Best-effort cleanup on process exit: drop in-memory task state and
+    cancel any lingering asyncio tasks so background workers don't block
+    SIGTERM handling. Disk-backed resources (uploads, OCR cache) survive
+    restarts by design.
+    """
+    size = _task_store.size()
+    if size:
+        logger.info("Shutdown: clearing %d in-flight task(s) from memory", size)
+    for task_id in list(_task_store.active_task_ids()):
+        _task_store.purge(task_id)
+
+    pending = [t for t in asyncio.all_tasks() if not t.done()]
+    for task in pending:
+        task.cancel()
+    if pending:
+        await asyncio.gather(*pending, return_exceptions=True)
 
 
 @app.get("/healthz", tags=["health"])
@@ -118,37 +201,61 @@ async def healthz() -> dict:
 
 @app.get("/readyz", tags=["health"])
 async def readyz() -> dict:
-    """Readiness probe: verifies the SQLite connection and runtime config load."""
+    """Readiness probe: verifies DB, runtime config, and the configured vocab provider.
+
+    The provider check is a soft signal — if the configured LLM provider lacks
+    an API key the probe downgrades to ``degraded`` rather than failing, so
+    the deployment stays serveable for users who only use dictionary lookups.
+    """
+    from sqlalchemy import text as sql_text
     try:
-        from backend.database import SessionLocal
         with SessionLocal() as session:
-            session.execute(__import__("sqlalchemy").text("SELECT 1"))
-        from backend.services.runtime_config import get_runtime_config
-        get_runtime_config()
-        return {"status": "ready"}
+            session.execute(sql_text("SELECT 1"))
+        runtime = get_runtime_config()
     except Exception as exc:   # noqa: BLE001
-        from fastapi import HTTPException
         raise HTTPException(status_code=503, detail=f"not ready: {exc}") from exc
+
+    providers = set(available_providers())
+    default_provider = runtime.vocab_provider
+    llm_cfg = runtime.llm
+    provider_keys = {
+        "claude": bool(llm_cfg.anthropic_api_key),
+        "deepseek": bool(llm_cfg.deepseek_api_key),
+        "openai": bool(llm_cfg.openai_api_key),
+        "merriam_webster": bool(settings.merriam_webster_key),
+        "youdao": bool(settings.youdao_app_key),
+    }
+
+    status = "ready"
+    notes: list[str] = []
+    if default_provider not in providers:
+        status = "degraded"
+        notes.append(f"default provider '{default_provider}' is not registered")
+    elif default_provider in provider_keys and not provider_keys[default_provider]:
+        status = "degraded"
+        notes.append(f"default provider '{default_provider}' is missing its API key")
+
+    return {
+        "status": status,
+        "providers": sorted(providers),
+        "default_provider": default_provider,
+        "provider_keys": provider_keys,
+        "notes": notes,
+    }
 
 
 # ── In-memory task store ──────────────────────────────────────────────────────
-_tasks: Dict[str, TaskStatus] = {}
-_task_texts: Dict[str, str] = {}
-# task_id → {user_id, exam_id, exam_code, dict_code}
-_task_meta: Dict[str, dict] = {}
+# Wrapped in a TaskStore for thread-safety; module-level helpers below keep the
+# original call-sites readable without re-plumbing the whole file.
+_task_store = TaskStore()
 
 
 def _update_task(task_id: str, **kwargs: Any) -> None:
-    task = _tasks.get(task_id)
-    if task:
-        for k, v in kwargs.items():
-            setattr(task, k, v)
+    _task_store.update(task_id, **kwargs)
 
 
 def _purge_task_cache(task_id: str) -> None:
-    _tasks.pop(task_id, None)
-    _task_texts.pop(task_id, None)
-    _task_meta.pop(task_id, None)
+    _task_store.purge(task_id)
 
 
 def _load_analysis_result(raw: str) -> AnalysisResult:
@@ -237,7 +344,7 @@ def _get_dict_for_user_or_404(db: Session, dict_code: str, user: User) -> DictMo
 
 
 def _sync_task_result(task_id: str, result: AnalysisResult, dict_code: Optional[str] = None) -> None:
-    task = _tasks.get(task_id)
+    task = _task_store.get(task_id)
     if task:
         task.result = result
         if dict_code:
@@ -290,7 +397,7 @@ def get_admin_user(user: User = Depends(get_current_user)) -> User:
 # ── Code generation helpers ───────────────────────────────────────────────────
 
 def _unique_exam_code(db: Session) -> str:
-    for _ in range(20):
+    for _ in range(MAX_UNIQUE_CODE_ATTEMPTS):
         code = generate_code(8)
         if not db.query(Exam).filter_by(exam_code=code).first():
             return code
@@ -298,7 +405,7 @@ def _unique_exam_code(db: Session) -> str:
 
 
 def _unique_dict_code(db: Session) -> str:
-    for _ in range(20):
+    for _ in range(MAX_UNIQUE_CODE_ATTEMPTS):
         code = "D" + generate_code(7)
         if not db.query(DictModel).filter_by(dict_code=code).first():
             return code
@@ -336,7 +443,7 @@ async def _run_analysis(
             except Exception as exc:
                 logger.warning("Text cleaning failed, using raw OCR: %s", exc)
 
-        _task_texts[task_id] = text
+        _task_store.set_text(task_id, text)
         _update_task(
             task_id, progress=30,
             message=f"Text extracted ({'OCR' if used_ocr else 'direct'}). Analysing structure…",
@@ -381,7 +488,7 @@ async def _run_analysis(
             db.commit()
             db.refresh(exam)
             meta: dict = {"user_id": user_id, "exam_id": exam.id, "exam_code": exam_code, "dict_code": None}
-            _task_meta[task_id] = meta
+            _task_store.set_meta(task_id, meta)
             _update_task(task_id, exam_code=exam_code)
 
             if vocab_table:
@@ -394,6 +501,7 @@ async def _run_analysis(
                     vocab=vocab_table,
                 )
                 meta["dict_code"] = record.dict_code
+                _task_store.merge_meta(task_id, dict_code=record.dict_code)
                 _update_task(task_id, dict_code=record.dict_code)
         finally:
             db.close()
@@ -427,7 +535,8 @@ class ResetPasswordRequest(BaseModel):
 # ── Auth endpoints ────────────────────────────────────────────────────────────
 
 @app.post("/auth/register")
-async def register(body: RegisterRequest, db: Session = Depends(get_db)):
+async def register(body: RegisterRequest, request: Request, db: Session = Depends(get_db)):
+    _enforce_rate_limit(request, "register")
     runtime = get_runtime_config(db)
     if not runtime.registration_enabled:
         raise HTTPException(403, "注册功能已关闭，请联系管理员")
@@ -453,7 +562,8 @@ async def register(body: RegisterRequest, db: Session = Depends(get_db)):
 
 
 @app.post("/auth/login")
-async def login(body: LoginRequest, db: Session = Depends(get_db)):
+async def login(body: LoginRequest, request: Request, db: Session = Depends(get_db)):
+    _enforce_rate_limit(request, "login")
     user = db.query(User).filter_by(username=body.username).first()
     if not user or not verify_password(body.password, user.password_hash):
         raise HTTPException(401, "用户名或密码错误")
@@ -539,9 +649,34 @@ async def analyze(
         raise HTTPException(401, "用户不存在")
 
     task_id = str(uuid.uuid4())
-    suffix = Path(file.filename or "upload.txt").suffix
+    safe_name = sanitize_filename(file.filename, fallback=f"upload-{task_id[:8]}")
+    suffix = Path(safe_name).suffix or ".txt"
     upload_path = Path(settings.upload_dir) / f"{task_id}{suffix}"
-    upload_path.write_bytes(await file.read())
+
+    # Stream the upload to disk so we can reject oversize files before they
+    # consume the full configured limit of memory.
+    max_bytes = settings.max_upload_mb * 1024 * 1024
+    total = 0
+    try:
+        with upload_path.open("wb") as sink:
+            while True:
+                chunk = await file.read(1024 * 1024)
+                if not chunk:
+                    break
+                total += len(chunk)
+                if total > max_bytes:
+                    sink.close()
+                    upload_path.unlink(missing_ok=True)
+                    raise HTTPException(
+                        413,
+                        f"上传文件过大（超过 {settings.max_upload_mb} MB）",
+                    )
+                sink.write(chunk)
+    except HTTPException:
+        raise
+    except Exception:
+        upload_path.unlink(missing_ok=True)
+        raise
 
     runtime = get_runtime_config(db)
     defaults = runtime.analysis
@@ -566,14 +701,15 @@ async def analyze(
         generate_vocab=bool(generate_vocab) if generate_vocab is not None else False,
     )
     task = TaskStatus(task_id=task_id, status="pending", progress=0, message="Queued")
-    _tasks[task_id] = task
-    background_tasks.add_task(_run_analysis, task_id, upload_path, file.filename or "unnamed", req, user.id)
+    _task_store.set(task_id, task)
+    display_name = file.filename or safe_name
+    background_tasks.add_task(_run_analysis, task_id, upload_path, display_name, req, user.id)
     return task
 
 
 @app.get("/api/tasks/{task_id}", response_model=TaskStatus)
 async def get_task(task_id: str):
-    task = _tasks.get(task_id)
+    task = _task_store.get(task_id)
     if not task:
         raise HTTPException(404, f"Task {task_id!r} not found")
     return task
@@ -595,16 +731,16 @@ async def generate_vocab_endpoint(
     if not user:
         raise HTTPException(401, "用户不存在")
 
-    task = _tasks.get(task_id)
+    task = _task_store.get(task_id)
     if not task:
         raise HTTPException(404, f"Task {task_id!r} not found")
     if task.status != "done":
         raise HTTPException(400, "任务尚未完成")
 
-    text = _task_texts.get(task_id, "")
+    text = _task_store.get_text(task_id)
     lemma_table = task.result.lemma_table if task.result else []
     user_id = user.id
-    meta = _task_meta.get(task_id, {})
+    meta = _task_store.get_meta(task_id)
     runtime = get_runtime_config(db)
     chosen_top_n = top_n if top_n is not None else runtime.analysis.top_n
 
@@ -639,9 +775,12 @@ async def generate_vocab_endpoint(
                         filename=(task.result.filename if task.result else "") or exam.filename,
                         vocab=vocab,
                     )
-                    _task_meta.setdefault(task_id, {})["exam_id"] = exam.id
-                    _task_meta.setdefault(task_id, {})["exam_code"] = exam.exam_code
-                    _task_meta.setdefault(task_id, {})["dict_code"] = record.dict_code
+                    _task_store.merge_meta(
+                        task_id,
+                        exam_id=exam.id,
+                        exam_code=exam.exam_code,
+                        dict_code=record.dict_code,
+                    )
                     _update_task(task_id, exam_code=exam.exam_code, dict_code=record.dict_code)
             finally:
                 db2.close()
@@ -650,7 +789,7 @@ async def generate_vocab_endpoint(
             _update_task(task_id, message=f"Vocab error: {exc}")
 
     background_tasks.add_task(_do)
-    return _tasks[task_id]
+    return _task_store.get(task_id)
 
 
 @app.get("/api/tasks/{task_id}/export/{fmt}")
@@ -659,7 +798,7 @@ async def export_results(
     fmt: str,
     selected_only: bool = Query(False),
 ):
-    task = _tasks.get(task_id)
+    task = _task_store.get(task_id)
     # Also try loading from DB if not in memory
     if not task or not task.result:
         db = SessionLocal()
@@ -681,7 +820,7 @@ async def export_results(
         result = task.result
 
     fmt = fmt.lower()
-    suffix = task_id[:8]
+    suffix = task_id[:EXPORT_FILENAME_TASK_SLICE]
     sel_suffix = "_selected" if selected_only else ""
     if fmt == "csv":
         return Response(
@@ -776,9 +915,12 @@ async def generate_vocab_for_exam(
         vocab=vocab,
     )
     _sync_task_result(exam.task_id, result, record.dict_code)
-    _task_meta.setdefault(exam.task_id, {})["exam_id"] = exam.id
-    _task_meta.setdefault(exam.task_id, {})["exam_code"] = exam.exam_code
-    _task_meta.setdefault(exam.task_id, {})["dict_code"] = record.dict_code
+    _task_store.merge_meta(
+        exam.task_id,
+        exam_id=exam.id,
+        exam_code=exam.exam_code,
+        dict_code=record.dict_code,
+    )
     return {
         "ok": True,
         "exam_code": exam.exam_code,
@@ -794,11 +936,11 @@ async def delete_vocab_entry(
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    task = _tasks.get(task_id)
+    task = _task_store.get(task_id)
     if not task or not task.result:
         raise HTTPException(404, "任务不存在")
 
-    meta = _task_meta.get(task_id, {})
+    meta = _task_store.get_meta(task_id)
     exam = None
     if meta.get("exam_id"):
         exam = db.query(Exam).filter_by(id=meta["exam_id"]).first()
@@ -882,8 +1024,8 @@ async def combine_exams(
     merged_lemmas = sorted(combined.values(), key=lambda x: x.score, reverse=True)
 
     runtime = get_runtime_config(db)
-    filenames = " + ".join(e.filename for e in exams[:3])
-    if len(exams) > 3:
+    filenames = " + ".join(e.filename for e in exams[:COMBINE_EXAMS_FILENAME_CAP])
+    if len(exams) > COMBINE_EXAMS_FILENAME_CAP:
         filenames += f" 等{len(exams)}份试卷"
 
     vocab_table: list[VocabEntry] = []
@@ -963,12 +1105,14 @@ async def update_vocab_selection(
     # Sync to in-memory task if active
     exam = record.exam
     if exam:
-        for task_id, meta in _task_meta.items():
-            if meta.get("exam_id") == exam.id and task_id in _tasks:
-                task = _tasks[task_id]
-                if task.result:
-                    task.result.vocab_table = vocab
-                break
+        for task_id in list(_task_store.active_task_ids()):
+            meta = _task_store.get_meta(task_id)
+            if meta.get("exam_id") != exam.id:
+                continue
+            task = _task_store.get(task_id)
+            if task and task.result:
+                task.result.vocab_table = vocab
+            break
 
     return {"ok": True, "updated": len(body.selections), "vocab_count": len(vocab)}
 
@@ -1157,9 +1301,11 @@ async def delete_dict(
     db.delete(record)
     db.commit()
 
-    if task_id and task_id in _task_meta and _task_meta[task_id].get("dict_code") == dict_code.upper():
-        _task_meta[task_id]["dict_code"] = None
-        _update_task(task_id, dict_code=None)
+    if task_id:
+        existing_meta = _task_store.get_meta(task_id)
+        if existing_meta.get("dict_code") == dict_code.upper():
+            _task_store.merge_meta(task_id, dict_code=None)
+            _update_task(task_id, dict_code=None)
 
     if exam_id:
         exam = db.query(Exam).filter_by(id=exam_id).first()
@@ -1226,8 +1372,16 @@ async def admin_overview(admin: User = Depends(get_admin_user), db: Session = De
 
 
 @app.get("/admin/users")
-async def admin_list_users(admin: User = Depends(get_admin_user), db: Session = Depends(get_db)):
-    users = db.query(User).order_by(User.created_at.asc()).all()
+async def admin_list_users(
+    admin: User = Depends(get_admin_user),
+    db: Session = Depends(get_db),
+    limit: int = Query(ADMIN_LIST_DEFAULT_LIMIT, ge=1, le=ADMIN_LIST_MAX_LIMIT),
+    offset: int = Query(0, ge=0),
+):
+    # Returns an array (legacy shape) — pagination via ?limit=&offset=.
+    users = (
+        db.query(User).order_by(User.created_at.asc()).offset(offset).limit(limit).all()
+    )
     return [
         {
             "id": u.id,
@@ -1267,9 +1421,18 @@ async def admin_reset_password(
 
 
 @app.get("/admin/codes")
-async def admin_list_codes(admin: User = Depends(get_admin_user), db: Session = Depends(get_db)):
-    exams = db.query(Exam).order_by(Exam.created_at.desc()).all()
-    dicts = db.query(DictModel).order_by(DictModel.created_at.desc()).all()
+async def admin_list_codes(
+    admin: User = Depends(get_admin_user),
+    db: Session = Depends(get_db),
+    limit: int = Query(ADMIN_LIST_DEFAULT_LIMIT, ge=1, le=ADMIN_LIST_MAX_LIMIT),
+    offset: int = Query(0, ge=0),
+):
+    exams = (
+        db.query(Exam).order_by(Exam.created_at.desc()).offset(offset).limit(limit).all()
+    )
+    dicts = (
+        db.query(DictModel).order_by(DictModel.created_at.desc()).offset(offset).limit(limit).all()
+    )
     return {
         "summary": _admin_overview_payload(db),
         "exams": [
@@ -1391,33 +1554,6 @@ async def admin_delete_user(
     return {"ok": True, "message": f"用户 {user.username} 已删除"}
 
 
-@app.post("/admin/ocr-test")
-async def admin_ocr_test(
-    file: UploadFile = File(...),
-    admin: User = Depends(get_admin_user),
-):
-    """Upload a file and return the raw OCR-extracted text for debugging."""
-    import tempfile
-    suffix = Path(file.filename or "upload.tmp").suffix.lower()
-    with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
-        tmp_path = Path(tmp.name)
-    try:
-        tmp_path.write_bytes(await file.read())
-        extracted = extract_text(tmp_path)
-        return {
-            "filename": file.filename,
-            "used_ocr": extracted.used_ocr,
-            "backend": extracted.backend,
-            "text_length": len(extracted.text),
-            "text_preview": extracted.text[:2000],
-            "text": extracted.text,
-        }
-    except Exception as exc:
-        raise HTTPException(500, f"文本提取失败: {exc}")
-    finally:
-        tmp_path.unlink(missing_ok=True)
-
-
 @app.get("/admin/system")
 async def admin_system_info(admin: User = Depends(get_admin_user)):
     """Return system/environment information for diagnostics."""
@@ -1513,22 +1649,27 @@ async def admin_clear_ocr_cache(admin: User = Depends(get_admin_user)):
 @app.post("/admin/ocr-test")
 async def admin_ocr_test(
     file: UploadFile = File(...),
+    use_cache: bool = Query(False, description="Whether to consult/update the OCR cache"),
     admin: User = Depends(get_admin_user),
 ):
-    """Upload a file and return the raw OCR-extracted text for debugging."""
+    """Upload a file and return the raw OCR-extracted text for debugging.
+
+    By default the cache is bypassed so the endpoint reflects current OCR
+    behaviour; pass ?use_cache=true to reuse any cached extraction.
+    """
     import tempfile
     suffix = Path(file.filename or "upload.tmp").suffix.lower()
     with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
         tmp_path = Path(tmp.name)
     try:
         tmp_path.write_bytes(await file.read())
-        extracted = extract_text(tmp_path, use_cache=False)
+        extracted = extract_text(tmp_path, use_cache=use_cache)
         return {
             "filename": file.filename,
             "used_ocr": extracted.used_ocr,
             "backend": extracted.backend,
             "text_length": len(extracted.text),
-            "text_preview": extracted.text[:2000],
+            "text_preview": extracted.text[:OCR_TEST_PREVIEW_CHARS],
             "text": extracted.text,
         }
     except Exception as exc:
