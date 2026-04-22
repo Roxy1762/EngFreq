@@ -48,7 +48,8 @@ class OcrRuntimeConfig(BaseModel):
 
 class MinerURuntimeConfig(BaseModel):
     enabled: bool = False
-    api_base: str = "https://mineru.net/api/v1/agent"
+    api_key: Optional[str] = None
+    api_base: str = "https://mineru.net/api/v4"
     language: str = "en"
     enable_table: bool = True
     enable_formula: bool = True
@@ -57,6 +58,14 @@ class MinerURuntimeConfig(BaseModel):
     poll_timeout_sec: int = Field(300, ge=30, le=1800)
     poll_interval_sec: int = Field(3, ge=1, le=30)
     fallback_to_local: bool = True
+
+
+class DictProviderConfig(BaseModel):
+    """Runtime overrides for dictionary provider credentials (supplements .env)."""
+    merriam_webster_key: Optional[str] = None
+    youdao_app_key: Optional[str] = None
+    youdao_app_secret: Optional[str] = None
+    ecdict_path: Optional[str] = None
 
 
 class TextCleanerConfig(BaseModel):
@@ -98,6 +107,7 @@ class RuntimeConfig(BaseModel):
     ocr_cache_enabled: bool = True
     text_cleaner: TextCleanerConfig = Field(default_factory=TextCleanerConfig)
     llm: LLMProviderConfig = Field(default_factory=LLMProviderConfig)
+    dict_providers: DictProviderConfig = Field(default_factory=DictProviderConfig)
     # AI vocabulary pre-processing: spell-fix + re-rank before enrichment
     ai_preprocess_enabled: bool = False
     # Automatic LLM fallback chain: if primary provider fails, try next LLM

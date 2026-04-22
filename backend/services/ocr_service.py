@@ -252,7 +252,13 @@ def ocr_image(path: Path) -> str:
     """Run OCR on a single image file."""
     with Image.open(str(path)) as raw:
         img = raw.copy()
-    return _ocr_image_core(path, img)
+    result = _ocr_image_core(path, img)
+    if not result.strip():
+        raise RuntimeError(
+            f"OCR extracted 0 characters from {path.name}. "
+            "The image may be blank or the OCR engine failed to read it."
+        )
+    return result
 
 
 def _pdf_page_images(path: Path) -> Iterable[Image.Image]:
@@ -310,4 +316,11 @@ def ocr_pdf(path: Path) -> str:
         if page_text:
             texts.append(page_text)
 
-    return "\n\n".join(texts)
+    result = "\n\n".join(texts)
+    if not result.strip():
+        raise RuntimeError(
+            "OCR extracted 0 characters from the PDF. "
+            "The file may be blank, corrupted, or require a different OCR engine. "
+            "Try enabling MinerU or switching the OCR engine in admin settings."
+        )
+    return result
