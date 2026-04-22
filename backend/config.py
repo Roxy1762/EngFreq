@@ -88,11 +88,30 @@ class Settings(BaseSettings):
     # ── Upload limits ─────────────────────────────────────────────────────────
     max_upload_mb: int = 50                 # reject uploads larger than this
 
+    # ── CORS / security ───────────────────────────────────────────────────────
+    # Comma-separated list of allowed origins, or "*" for the permissive legacy
+    # default. Avoid the wildcard in production when cookies/Authorization
+    # headers are in play.
+    cors_allow_origins: str = "*"
+    security_headers_enabled: bool = True
+    hsts_enabled: bool = False              # enable only behind HTTPS terminator
+
+    # ── Auth rate limiting (per client IP) ────────────────────────────────────
+    auth_rate_limit_attempts: int = 10
+    auth_rate_limit_window_seconds: float = 60.0
+
     model_config = {
         "env_file": ".env",
         "env_file_encoding": "utf-8",
         "extra": "ignore",
     }
+
+    @property
+    def cors_origins_list(self) -> list[str]:
+        raw = (self.cors_allow_origins or "*").strip()
+        if raw == "*" or not raw:
+            return ["*"]
+        return [o.strip() for o in raw.split(",") if o.strip()]
 
 
 settings = Settings()
