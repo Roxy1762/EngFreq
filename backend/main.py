@@ -75,6 +75,7 @@ from backend.services.frequency_analyzer import analyse
 from backend.services.runtime_config import frontend_config_payload, get_runtime_config, save_runtime_config
 from backend.services.structure_recognizer import recognize_structure
 from backend.services.vocabulary_generator import available_providers, generate_vocabulary
+from backend.utils.datetime_compat import iso_z
 from backend.utils.rate_limit import SlidingWindowLimiter
 from backend.utils.security import SecurityHeadersMiddleware, client_identifier, sanitize_filename
 from backend.utils.task_store import TaskStore
@@ -862,7 +863,7 @@ async def get_my_codes(user: User = Depends(get_current_user), db: Session = Dep
             {
                 "exam_code": e.exam_code,
                 "filename": e.filename,
-                "created_at": e.created_at.isoformat(),
+                "created_at": iso_z(e.created_at),
                 "dict_count": len(e.dicts),
                 "dict_codes": [d.dict_code for d in e.dicts],
                 "parse_backend": e.raw_parse_backend or "local",
@@ -876,7 +877,7 @@ async def get_my_codes(user: User = Depends(get_current_user), db: Session = Dep
             {
                 "dict_code": d.dict_code,
                 "filename": d.filename,
-                "created_at": d.created_at.isoformat(),
+                "created_at": iso_z(d.created_at),
                 "exam_code": d.exam.exam_code if d.exam else None,
             }
             for d in dicts
@@ -1260,7 +1261,7 @@ async def list_my_exams(
             "exam_code": e.exam_code,
             "task_id": e.task_id,
             "filename": e.filename,
-            "created_at": e.created_at.isoformat(),
+            "created_at": iso_z(e.created_at),
             "parse_backend": e.raw_parse_backend or "local",
             "is_combined": bool(e.is_combined),
             "source_exam_codes": json.loads(e.source_exam_codes) if e.source_exam_codes else [],
@@ -1341,7 +1342,7 @@ async def share_exam(code: str, db: Session = Depends(get_db)):
     return {
         "exam_code": exam.exam_code,
         "filename": exam.filename,
-        "created_at": exam.created_at.isoformat(),
+        "created_at": iso_z(exam.created_at),
         "uploaded_by": exam.user.username,
         "parse_backend": exam.raw_parse_backend or "local",
         "raw_parse_stored": bool(exam.raw_parse_result_json),
@@ -1357,7 +1358,7 @@ async def share_dict(code: str, db: Session = Depends(get_db)):
     return {
         "dict_code": d.dict_code,
         "filename": d.filename,
-        "created_at": d.created_at.isoformat(),
+        "created_at": iso_z(d.created_at),
         "uploaded_by": d.user.username,
         "exam_code": d.exam.exam_code if d.exam else None,
         "vocab": json.loads(d.vocab_json),
@@ -1387,15 +1388,15 @@ async def admin_list_users(
             "id": u.id,
             "username": u.username,
             "is_admin": u.is_admin,
-            "created_at": u.created_at.isoformat(),
+            "created_at": iso_z(u.created_at),
             "exam_count": len(u.exams),
             "dict_count": len(u.dicts),
             "latest_exam_at": (
-                max((exam.created_at for exam in u.exams), default=None).isoformat()
+                iso_z(max((exam.created_at for exam in u.exams), default=None))
                 if u.exams else None
             ),
             "latest_dict_at": (
-                max((record.created_at for record in u.dicts), default=None).isoformat()
+                iso_z(max((record.created_at for record in u.dicts), default=None))
                 if u.dicts else None
             ),
         }
@@ -1440,7 +1441,7 @@ async def admin_list_codes(
                 "exam_code": e.exam_code,
                 "filename": e.filename,
                 "username": e.user.username,
-                "created_at": e.created_at.isoformat(),
+                "created_at": iso_z(e.created_at),
                 "parse_backend": e.raw_parse_backend or "local",
                 "raw_parse_stored": bool(e.raw_parse_result_json),
             }
@@ -1452,7 +1453,7 @@ async def admin_list_codes(
                 "filename": d.filename,
                 "username": d.user.username,
                 "exam_code": d.exam.exam_code if d.exam else None,
-                "created_at": d.created_at.isoformat(),
+                "created_at": iso_z(d.created_at),
             }
             for d in dicts
         ],
