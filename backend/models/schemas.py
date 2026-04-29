@@ -161,3 +161,8 @@ class TaskStatus(BaseModel):
     error: Optional[str] = None
     exam_code: Optional[str] = None   # set after result saved to DB
     dict_code: Optional[str] = None   # set after vocab saved to DB
+    # Independent vocab pipeline state — None until the user requests vocab,
+    # then transitions processing → done | error. Polling on this avoids the
+    # race where vocab_table briefly looks "empty" between status-=='done' and
+    # the vocab background job mutating result.vocab_table in place.
+    vocab_status: Optional[str] = None

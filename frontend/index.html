@@ -1077,13 +1077,26 @@ function buildFormData(file) {
 
 async function waitForTask(taskId) {
   return new Promise((resolve, reject) => {
+    let consecutiveErrors = 0;
     const t = setInterval(async () => {
       try {
-        const r = await fetch(`/api/tasks/${taskId}`);
+        const r = await apiFetch(`/api/tasks/${taskId}`);
+        if (!r.ok) {
+          consecutiveErrors++;
+          if (r.status === 401 || r.status === 403 || consecutiveErrors >= 5) {
+            clearInterval(t);
+            reject(new Error(`轮询失败 (HTTP ${r.status})`));
+          }
+          return;
+        }
+        consecutiveErrors = 0;
         const d = await r.json();
         if (d.status === 'done') { clearInterval(t); resolve(d); }
         if (d.status === 'error') { clearInterval(t); reject(new Error(d.error || d.message)); }
-      } catch (e) { clearInterval(t); reject(e); }
+      } catch (e) {
+        consecutiveErrors++;
+        if (consecutiveErrors >= 5) { clearInterval(t); reject(e); }
+      }
     }, 1200);
   });
 }
@@ -1159,16 +1172,40 @@ function g(id, isCheck = false) {
 
 function pollStatus() {
   if (pollTimer) clearInterval(pollTimer);
+  let consecutiveErrors = 0;
   pollTimer = setInterval(async () => {
     try {
-      const resp = await fetch(`/api/tasks/${currentTaskId}`);
+      const resp = await apiFetch(`/api/tasks/${currentTaskId}`);
+      if (!resp.ok) {
+        consecutiveErrors++;
+        if (resp.status === 401 || resp.status === 403) {
+          clearInterval(pollTimer);
+          showProgress(0, `轮询失败 (HTTP ${resp.status})，请重新登录`, 'error');
+          document.getElementById('analyze-btn').disabled = false;
+          return;
+        }
+        if (consecutiveErrors >= 5) {
+          clearInterval(pollTimer);
+          showProgress(0, `轮询失败 (HTTP ${resp.status})`, 'error');
+          document.getElementById('analyze-btn').disabled = false;
+        }
+        return;
+      }
+      consecutiveErrors = 0;
       const data = await resp.json();
       updateProgress(data);
       if (data.status === 'done' || data.status === 'error') {
         clearInterval(pollTimer);
         document.getElementById('analyze-btn').disabled = false;
       }
-    } catch {}
+    } catch (e) {
+      consecutiveErrors++;
+      if (consecutiveErrors >= 5) {
+        clearInterval(pollTimer);
+        showProgress(0, `网络错误：${e.message || '连接中断'}`, 'error');
+        document.getElementById('analyze-btn').disabled = false;
+      }
+    }
   }, 1000);
 }
 
@@ -1413,9 +1450,23 @@ async function aiSelectVocab() {
   }
 }
 
-function exportSelectedVocab(fmt) {
+async function exportSelectedVocab(fmt) {
   if (!currentTaskId) return;
-  window.location.href = `/api/tasks/${currentTaskId}/export/${fmt}?selected_only=true`;
+  try {
+    const resp = await apiFetch(`/api/tasks/${currentTaskId}/export/${fmt}?selected_only=true`);
+    if (!resp.ok) {
+      const err = await resp.json().catch(() => ({}));
+      throw new Error(err.detail || `HTTP ${resp.status}`);
+    }
+    const blob = await resp.blob();
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = `vocab_${currentTaskId.slice(0, 8)}_selected.${fmt}`;
+    document.body.appendChild(a); a.click();
+    setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 0);
+  } catch (e) {
+    alert('导出失败：' + e.message);
+  }
 }
 
 function levelBadge(level) {
@@ -1502,17 +1553,56 @@ async function generateVocab() {
   fd.append('top_n', topN);
 
   try {
-    await apiFetch(`/api/tasks/${currentTaskId}/vocab`, { method: 'POST', body: fd });
+    const kick = await apiFetch(`/api/tasks/${currentTaskId}/vocab`, { method: 'POST', body: fd });
+    if (!kick.ok) {
+      const err = await kick.json().catch(() => ({}));
+      throw new Error(err.detail || `HTTP ${kick.status}`);
+    }
+    const VOCAB_POLL_TIMEOUT_MS = 5 * 60 * 1000;   // 5 min hard cap
+    const startedAt = Date.now();
+    let consecutiveErrors = 0;
+    const finish = (ok, msg) => {
+      btn.disabled = false; btn.textContent = '✨ 生成词汇表';
+      if (!ok) alert('词汇表生成失败：' + msg);
+    };
     const checkVocab = setInterval(async () => {
-      const resp = await fetch(`/api/tasks/${currentTaskId}`);
-      const data = await resp.json();
-      if (data.result && data.result.vocab_table && data.result.vocab_table.length > 0) {
-        clearInterval(checkVocab);
-        resultData = data.result;
-        renderVocab(data.result.vocab_table);
-        switchTab('tab-vocab', document.querySelectorAll('#results-section .tab-btn')[3]);
-        btn.disabled = false; btn.textContent = '✨ 生成词汇表';
-        if (data.dict_code) updateDictCode(data.dict_code);
+      if (Date.now() - startedAt > VOCAB_POLL_TIMEOUT_MS) {
+        clearInterval(checkVocab); finish(false, '生成超时');
+        return;
+      }
+      try {
+        const resp = await apiFetch(`/api/tasks/${currentTaskId}`);
+        if (!resp.ok) {
+          consecutiveErrors++;
+          if (consecutiveErrors >= 5 || resp.status === 401 || resp.status === 403) {
+            clearInterval(checkVocab); finish(false, `轮询失败 (HTTP ${resp.status})`);
+          }
+          return;
+        }
+        consecutiveErrors = 0;
+        const data = await resp.json();
+        if (data.vocab_status === 'error') {
+          clearInterval(checkVocab); finish(false, data.message || '生成出错');
+          return;
+        }
+        // Done is signalled by the backend via `vocab_status` (preferred) or
+        // by a non-empty vocab_table for older clients that don't yet send
+        // the field.
+        const ready = data.vocab_status === 'done'
+          || (data.vocab_status == null && data.result && (data.result.vocab_table || []).length > 0);
+        if (ready) {
+          clearInterval(checkVocab);
+          resultData = data.result;
+          renderVocab(data.result.vocab_table || []);
+          switchTab('tab-vocab', document.querySelectorAll('#results-section .tab-btn')[3]);
+          if (data.dict_code) updateDictCode(data.dict_code);
+          finish(true);
+        }
+      } catch (e) {
+        consecutiveErrors++;
+        if (consecutiveErrors >= 5) {
+          clearInterval(checkVocab); finish(false, e.message || '网络错误');
+        }
       }
     }, 1500);
   } catch (e) {
@@ -1524,9 +1614,27 @@ async function generateVocab() {
 // ════════════════════════════════════════════════════════════════════════
 // Export
 // ════════════════════════════════════════════════════════════════════════
-function exportFile(fmt) {
+async function exportFile(fmt) {
   if (!currentTaskId) return;
-  window.location.href = `/api/tasks/${currentTaskId}/export/${fmt}`;
+  // The export endpoint requires auth — we pipe the JWT through ?token= so the
+  // browser navigation works without losing the Bearer header. (Server still
+  // verifies the token and ownership before streaming the file.)
+  const url = `/api/tasks/${currentTaskId}/export/${fmt}`;
+  try {
+    const resp = await apiFetch(url);
+    if (!resp.ok) {
+      const err = await resp.json().catch(() => ({}));
+      throw new Error(err.detail || `HTTP ${resp.status}`);
+    }
+    const blob = await resp.blob();
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = `vocab_${currentTaskId.slice(0, 8)}.${fmt}`;
+    document.body.appendChild(a); a.click();
+    setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 0);
+  } catch (e) {
+    alert('导出失败：' + e.message);
+  }
 }
 
 // ════════════════════════════════════════════════════════════════════════

@@ -8,6 +8,7 @@ Sign up at: https://ai.youdao.com/
 """
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import logging
 import time
@@ -21,6 +22,7 @@ from backend.providers.base_provider import BaseVocabProvider
 logger = logging.getLogger(__name__)
 
 _YOUDAO_API_URL = "https://openapi.youdao.com/api"
+_CONCURRENCY = 4   # Youdao tolerates a small concurrent burst per app key
 
 _POS_MAP = {
     "n.": "noun", "v.": "verb", "adj.": "adj", "adv.": "adv",
@@ -64,7 +66,7 @@ class YoudaoProvider(BaseVocabProvider):
         sign_str = self._app_key + input_str + salt + curtime + self._app_secret
         return hashlib.sha256(sign_str.encode("utf-8")).hexdigest()
 
-    async def _lookup(self, word: str) -> Optional[dict]:
+    async def _lookup(self, client, word: str) -> Optional[dict]:
         salt = str(uuid.uuid4())
         curtime = str(int(time.time()))
         sign = self._sign(word, salt, curtime)
@@ -81,10 +83,9 @@ class YoudaoProvider(BaseVocabProvider):
         }
 
         try:
-            async with self._httpx.AsyncClient(timeout=8.0) as client:
-                resp = await client.post(_YOUDAO_API_URL, data=params)
-                resp.raise_for_status()
-                data = resp.json()
+            resp = await client.post(_YOUDAO_API_URL, data=params)
+            resp.raise_for_status()
+            data = resp.json()
         except Exception as exc:
             logger.warning("Youdao API error for '%s': %s", word, exc)
             return None
@@ -158,26 +159,34 @@ class YoudaoProvider(BaseVocabProvider):
         )
 
     async def enrich(self, entries: List[LemmaEntry], context_text: str = "") -> List[VocabEntry]:
-        results: List[VocabEntry] = []
+        if not entries:
+            return []
 
-        for entry in entries:
-            data = await self._lookup(entry.lemma)
+        sem = asyncio.Semaphore(_CONCURRENCY)
+
+        async def _one(client, entry: LemmaEntry) -> VocabEntry:
+            async with sem:
+                data = await self._lookup(client, entry.lemma)
             if data:
-                results.append(self._parse_response(entry.lemma, data, entry))
-            else:
-                results.append(VocabEntry(
-                    headword=entry.lemma,
-                    lemma=entry.lemma,
-                    family=entry.family_id,
-                    pos=entry.pos,
-                    chinese_meaning="",
-                    english_definition="",
-                    body_count=entry.body_count,
-                    stem_count=entry.stem_count,
-                    option_count=entry.option_count,
-                    total_count=entry.total_count,
-                    score=entry.score,
-                    source="youdao_error",
-                ))
+                return self._parse_response(entry.lemma, data, entry)
+            return VocabEntry(
+                headword=entry.lemma,
+                lemma=entry.lemma,
+                family=entry.family_id,
+                pos=entry.pos,
+                chinese_meaning="",
+                english_definition="",
+                body_count=entry.body_count,
+                stem_count=entry.stem_count,
+                option_count=entry.option_count,
+                total_count=entry.total_count,
+                score=entry.score,
+                source="youdao_error",
+            )
 
-        return results
+        # Reuse a single AsyncClient so we get HTTP/1.1 keep-alive and TLS
+        # session caching across requests instead of paying handshake cost
+        # per word. Worst-case wall time drops from N×8s to roughly
+        # ceil(N/_CONCURRENCY) × 8s.
+        async with self._httpx.AsyncClient(timeout=8.0) as client:
+            return list(await asyncio.gather(*(_one(client, e) for e in entries)))

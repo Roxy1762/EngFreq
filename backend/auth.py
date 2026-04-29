@@ -14,8 +14,18 @@ from passlib.context import CryptContext
 _KEY_FILE = "secret.key"
 if not os.path.exists(_KEY_FILE):
     _generated = secrets.token_hex(32)
-    with open(_KEY_FILE, "w") as _f:
-        _f.write(_generated)
+    # Open with 0600 so the JWT signing key isn't world-readable when
+    # the default umask is permissive (e.g. running as root in a container).
+    _fd = os.open(_KEY_FILE, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    try:
+        os.write(_fd, _generated.encode("ascii"))
+    finally:
+        os.close(_fd)
+
+try:
+    os.chmod(_KEY_FILE, 0o600)
+except OSError:
+    pass
 
 with open(_KEY_FILE) as _f:
     _FILE_SECRET = _f.read().strip()
