@@ -35,6 +35,7 @@ import json
 import logging
 import os
 import uuid
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, Optional
 
@@ -128,8 +129,27 @@ def _ensure_admin() -> None:
 
 _ensure_admin()
 
+
+# ── Lifespan (replaces deprecated @app.on_event) ─────────────────────────────
+@asynccontextmanager
+async def _lifespan(app: FastAPI):
+    yield
+    # Graceful shutdown: drop in-memory task state and cancel lingering tasks.
+    size = _task_store.size()
+    if size:
+        logger.info("Shutdown: clearing %d in-flight task(s) from memory", size)
+    for task_id in list(_task_store.active_task_ids()):
+        _task_store.purge(task_id)
+
+    pending = [t for t in asyncio.all_tasks() if not t.done()]
+    for task in pending:
+        task.cancel()
+    if pending:
+        await asyncio.gather(*pending, return_exceptions=True)
+
+
 # ── FastAPI app ───────────────────────────────────────────────────────────────
-app = FastAPI(title="English Exam Word Analyzer", version="2.0.0")
+app = FastAPI(title="English Exam Word Analyzer", version="2.0.0", lifespan=_lifespan)
 
 _cors_origins = settings.cors_origins_list
 _cors_allow_credentials = _cors_origins != ["*"]
@@ -172,26 +192,6 @@ def _enforce_rate_limit(request: Request, bucket: str) -> None:
 _ASSETS_DIR = Path(__file__).parent.parent / "frontend" / "assets"
 _ASSETS_DIR.mkdir(parents=True, exist_ok=True)
 app.mount("/assets", StaticFiles(directory=str(_ASSETS_DIR)), name="assets")
-
-
-@app.on_event("shutdown")
-async def _graceful_shutdown() -> None:
-    """Best-effort cleanup on process exit: drop in-memory task state and
-    cancel any lingering asyncio tasks so background workers don't block
-    SIGTERM handling. Disk-backed resources (uploads, OCR cache) survive
-    restarts by design.
-    """
-    size = _task_store.size()
-    if size:
-        logger.info("Shutdown: clearing %d in-flight task(s) from memory", size)
-    for task_id in list(_task_store.active_task_ids()):
-        _task_store.purge(task_id)
-
-    pending = [t for t in asyncio.all_tasks() if not t.done()]
-    for task in pending:
-        task.cancel()
-    if pending:
-        await asyncio.gather(*pending, return_exceptions=True)
 
 
 @app.get("/healthz", tags=["health"])
@@ -445,7 +445,7 @@ async def _run_analysis(
     try:
         _update_task(task_id, status="processing", progress=5, message="Extracting text…")
 
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         runtime = get_runtime_config()
         extracted = await loop.run_in_executor(None, extract_text, file_path)
         text = extracted.text
@@ -1107,7 +1107,6 @@ async def combine_exams(
 
     # Save combined exam record
     exam_code = _unique_exam_code(db)
-    import json as _json
     new_exam = Exam(
         user_id=user.id,
         task_id=combined_result.task_id,
@@ -1116,7 +1115,7 @@ async def combine_exams(
         result_json=combined_result.model_dump_json(),
         raw_parse_backend="combined",
         is_combined=True,
-        source_exam_codes=_json.dumps(source_codes),
+        source_exam_codes=json.dumps(source_codes),
     )
     db.add(new_exam)
     db.commit()
@@ -1218,51 +1217,52 @@ async def vocab_ai_select(
 
     # Use AI to select words
     try:
-        import json as _json
-        prompt = f"""You are a senior 高考 English vocabulary coach helping Chinese students maximize their exam performance.
+        from backend.utils.llm_client import chat as llm_chat, is_llm_provider, resolve_active_llm
+        from backend.utils.json_parse import parse_json_object
 
-Study goal: {body.goal}
-Words to select: {body.max_words}
-
-## Selection Criteria (in priority order)
-1. PRIORITY: 高考 level words the student likely does NOT know — highest study value
-2. INCLUDE sparingly: 超纲 words that appear very frequently in this exam (score ≥ 2.0)
-3. SKIP: 基础 words (extremely common, students already know: the, go, big, year, get, make)
-4. PREFER: words with high option_count (appeared in answer choices = high exam importance)
-5. PREFER: words with rich collocations or usage patterns useful in 完形填空/阅读理解
-
-## Output
-Return ONLY a valid JSON object — no markdown, no extra text:
-{{"selected": ["word1", "word2", ...], "reasoning": "2-3 sentence explanation of selection strategy"}}
-
-The "selected" array must contain exactly {body.max_words} words (or fewer if the list is too small).
-Preserve the original spelling from the input list.
-
-## Word List
-{_json.dumps(word_info, ensure_ascii=False, indent=2)}"""
+        system_prompt = (
+            "You are a senior 高考 English vocabulary coach helping Chinese students maximize their exam performance. "
+            "Return ONLY valid JSON — no markdown, no extra text."
+        )
+        user_prompt = (
+            f"Study goal: {body.goal}\n"
+            f"Words to select: {body.max_words}\n\n"
+            "## Selection Criteria (in priority order)\n"
+            "1. PRIORITY: 高考 level words the student likely does NOT know — highest study value\n"
+            "2. INCLUDE sparingly: 超纲 words that appear very frequently in this exam (score ≥ 2.0)\n"
+            "3. SKIP: 基础 words (extremely common, students already know: the, go, big, year, get, make)\n"
+            "4. PREFER: words with high option_count (appeared in answer choices = high exam importance)\n"
+            "5. PREFER: words with rich collocations or usage patterns useful in 完形填空/阅读理解\n\n"
+            "## Output\n"
+            'Return ONLY a valid JSON object: {"selected": ["word1", ...], "reasoning": "2-3 sentence explanation"}\n\n'
+            f"The 'selected' array must contain exactly {body.max_words} words (or fewer if the list is too small).\n\n"
+            "## Word List\n"
+            f"{json.dumps(word_info, ensure_ascii=False, indent=2)}"
+        )
 
         selected_words: list[str] = []
         reasoning = ""
 
-        runtime = get_runtime_config(db)
-        if provider_name == "claude" and runtime.llm.anthropic_api_key:
-            import anthropic
-            client = anthropic.AsyncAnthropic(api_key=runtime.llm.anthropic_api_key)
-            resp = await client.messages.create(
-                model=runtime.ai_model,
-                max_tokens=1024,
-                messages=[{"role": "user", "content": prompt}],
-            )
-            raw = resp.content[0].text.strip()
-            if raw.startswith("```"):
-                raw = raw.split("```", 2)[1]
-                if raw.startswith("json"):
-                    raw = raw[4:]
-                raw = raw.rsplit("```", 1)[0].strip()
-            data = _json.loads(raw)
-            selected_words = data.get("selected", [])
-            reasoning = data.get("reasoning", "")
-        else:
+        if is_llm_provider(provider_name):
+            try:
+                provider, model = resolve_active_llm(provider_name)
+                resp = await llm_chat(
+                    provider=provider,
+                    model=model,
+                    system=system_prompt,
+                    user=user_prompt,
+                    max_tokens=1024,
+                    temperature=0.2,
+                    use_prompt_cache=True,
+                    label=f"{provider}-ai-select",
+                )
+                data = parse_json_object(resp.text)
+                selected_words = data.get("selected", [])
+                reasoning = data.get("reasoning", "")
+            except Exception as exc:
+                logger.warning("AI word selection via %s failed: %s — using fallback", provider_name, exc)
+
+        if not selected_words:
             # Fallback: select by level priority and score
             gaokao_words = [e for e in result.vocab_table if e.word_level in ("高考", None)]
             gaokao_words.sort(key=lambda x: x.score, reverse=True)

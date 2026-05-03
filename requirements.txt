@@ -8,11 +8,16 @@ nltk>=3.8.1
 # PDF extraction: PyMuPDF is primary (fast), pdfplumber is fallback (accurate tables)
 PyMuPDF>=1.24.0
 pdfplumber>=0.10.3
+# PDF-to-image rasteriser used by ocr_service.py for scanned PDFs
+pdf2image>=1.17.0
 python-docx>=1.1.0
 Pillow>=10.1.0
 pytesseract>=0.3.10
-rapidocr>=3.8.1
-onnxruntime>=1.24.4
+# Pin onnxruntime to stay compatible with the rapidocr version range below.
+# onnxruntime wheels are not always available for all platforms; if installation
+# fails, try onnxruntime-openvino or onnxruntime-gpu as an alternative.
+onnxruntime>=1.16.0,<2.0
+rapidocr>=3.1.0
 # Frequency scoring (Zipf) and CEFR classification
 wordfreq>=3.1.1
 cefrpy>=1.1.0
