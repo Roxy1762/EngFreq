@@ -30,6 +30,8 @@ class FreeDictProvider(BaseVocabProvider):
         entries: List[LemmaEntry],
         context_text: str = "",
     ) -> List[VocabEntry]:
+        if not entries:
+            return []
         sem = asyncio.Semaphore(_CONCURRENCY)
         async with httpx.AsyncClient(timeout=10.0) as client:
             tasks = [self._fetch_one(client, sem, e) for e in entries]
@@ -41,7 +43,18 @@ class FreeDictProvider(BaseVocabProvider):
                 vocab.append(result)
             else:
                 logger.warning(f"free_dict failed for '{entry.lemma}': {result}")
-                vocab.append(self._stub(entry))
+                vocab.append(self._stub(entry, reason="free_dict_error"))
+
+        # If literally every entry came back as a "miss"/error stub the
+        # network is almost certainly down (or DNS, or the API is rate-
+        # limiting us). Raise so the vocabulary fallback chain promotes the
+        # next provider instead of silently delivering an empty word list.
+        real_hits = sum(1 for v in vocab if not v.source.startswith("free_dict_"))
+        if entries and real_hits == 0:
+            raise RuntimeError(
+                "free_dict returned no real definitions for any of "
+                f"{len(entries)} words — treating as provider failure"
+            )
         return vocab
 
     async def _fetch_one(
@@ -55,12 +68,12 @@ class FreeDictProvider(BaseVocabProvider):
             try:
                 resp = await client.get(url)
                 if resp.status_code == 404:
-                    return self._stub(entry)
+                    return self._stub(entry, reason="free_dict_miss")
                 resp.raise_for_status()
                 data = resp.json()
             except Exception as e:
                 logger.debug(f"HTTP error for '{entry.lemma}': {e}")
-                return self._stub(entry)
+                return self._stub(entry, reason="free_dict_error")
 
         return self._parse(entry, data)
 
@@ -99,7 +112,7 @@ class FreeDictProvider(BaseVocabProvider):
         )
 
     @staticmethod
-    def _stub(entry: LemmaEntry) -> VocabEntry:
+    def _stub(entry: LemmaEntry, reason: str = "free_dict_miss") -> VocabEntry:
         return VocabEntry(
             headword=entry.lemma,
             lemma=entry.lemma,
@@ -110,5 +123,5 @@ class FreeDictProvider(BaseVocabProvider):
             option_count=entry.option_count,
             total_count=entry.total_count,
             score=entry.score,
-            source="free_dict_miss",
+            source=reason,
         )

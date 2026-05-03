@@ -395,6 +395,26 @@ def get_admin_user(user: User = Depends(get_current_user)) -> User:
     return user
 
 
+def _user_owns_task(task_id: str, user: User, db: Session) -> bool:
+    """Return True if `user` may read/manipulate the task. Admins always pass.
+
+    Ownership is resolved in two layers — the in-memory task store (set when
+    the upload starts) and the persisted Exam row (set after analysis
+    completes). We accept either signal so that polling works during the
+    short window before the Exam row is written.
+    """
+    if user.is_admin:
+        return True
+    meta = _task_store.get_meta(task_id)
+    owner = meta.get("user_id")
+    if owner is not None:
+        return owner == user.id
+    exam = db.query(Exam).filter_by(task_id=task_id).first()
+    if exam is None:
+        return False
+    return exam.user_id == user.id
+
+
 # ── Code generation helpers ───────────────────────────────────────────────────
 
 def _unique_exam_code(db: Session) -> str:
@@ -709,10 +729,16 @@ async def analyze(
 
 
 @app.get("/api/tasks/{task_id}", response_model=TaskStatus)
-async def get_task(task_id: str):
+async def get_task(
+    task_id: str,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
     task = _task_store.get(task_id)
     if not task:
         raise HTTPException(404, f"Task {task_id!r} not found")
+    if not _user_owns_task(task_id, user, db):
+        raise HTTPException(403, "无权访问该任务")
     return task
 
 
@@ -735,6 +761,8 @@ async def generate_vocab_endpoint(
     task = _task_store.get(task_id)
     if not task:
         raise HTTPException(404, f"Task {task_id!r} not found")
+    if not _user_owns_task(task_id, user, db):
+        raise HTTPException(403, "无权访问该任务")
     if task.status != "done":
         raise HTTPException(400, "任务尚未完成")
 
@@ -746,17 +774,17 @@ async def generate_vocab_endpoint(
     chosen_top_n = top_n if top_n is not None else runtime.analysis.top_n
 
     async def _do() -> None:
+        # Mark vocab as in-flight so the frontend can poll a positive signal
+        # rather than length-checking the result list (which races with the
+        # final assignment below and would never flip on an empty success).
+        _update_task(task_id, vocab_status="processing", message="Generating vocabulary…")
         try:
-            _update_task(task_id, message="Generating vocabulary…")
             vocab = await generate_vocabulary(
                 lemma_table,
                 context_text=text,
                 top_n=chosen_top_n,
                 provider_name=provider or runtime.vocab_provider,
             )
-            if task.result:
-                task.result.vocab_table = vocab
-            _update_task(task_id, message="Vocabulary ready.")
 
             db2 = SessionLocal()
             try:
@@ -765,6 +793,12 @@ async def generate_vocab_endpoint(
                     exam = db2.query(Exam).filter_by(id=meta.get("exam_id")).first()
                 if exam is None:
                     exam = db2.query(Exam).filter_by(task_id=task_id).first()
+
+                # Apply the in-memory mutation only AFTER we've prepared the DB
+                # write, so a poll between vocab arrival and persistence still
+                # reflects a coherent state.
+                if task.result:
+                    task.result.vocab_table = vocab
 
                 if exam and task.result:
                     _persist_exam_result(db2, exam, task.result)
@@ -783,11 +817,20 @@ async def generate_vocab_endpoint(
                         dict_code=record.dict_code,
                     )
                     _update_task(task_id, exam_code=exam.exam_code, dict_code=record.dict_code)
+            except Exception:
+                db2.rollback()
+                raise
             finally:
                 db2.close()
+
+            _update_task(task_id, vocab_status="done", message="Vocabulary ready.")
         except Exception as exc:
             logger.exception("Vocab generation failed for task %s", task_id)
-            _update_task(task_id, message=f"Vocab error: {exc}")
+            _update_task(
+                task_id,
+                vocab_status="error",
+                message=f"Vocab error: {exc}",
+            )
 
     background_tasks.add_task(_do)
     return _task_store.get(task_id)
@@ -797,24 +840,38 @@ async def generate_vocab_endpoint(
 async def export_results(
     task_id: str,
     fmt: str,
+    request: Request,
     selected_only: bool = Query(False),
+    token: Optional[str] = Query(None, description="Fallback auth for browser-driven downloads"),
+    db: Session = Depends(get_db),
 ):
+    # Browsers can't attach Authorization headers to a navigation, so we accept
+    # the same JWT via the ?token= query parameter as a controlled fallback.
+    payload = _bearer_payload(request)
+    if payload is None and token:
+        payload = decode_token(token)
+    if not payload:
+        raise HTTPException(401, "请先登录后再下载")
+    user = db.query(User).filter_by(id=int(payload["sub"])).first()
+    if not user:
+        raise HTTPException(401, "用户不存在")
+
+    if not _user_owns_task(task_id, user, db):
+        raise HTTPException(403, "无权下载该任务的结果")
+
     task = _task_store.get(task_id)
     # Also try loading from DB if not in memory
     if not task or not task.result:
-        db = SessionLocal()
-        try:
-            exam = db.query(Exam).filter_by(task_id=task_id).first()
-            if exam:
-                result = _load_analysis_result(exam.result_json)
-                # Load latest dict vocab
-                record = db.query(DictModel).filter_by(exam_id=exam.id).order_by(DictModel.created_at.desc()).first()
-                if record:
-                    result.vocab_table = [VocabEntry.model_validate(item) for item in json.loads(record.vocab_json)]
-            else:
-                raise HTTPException(400, "没有可导出的完整结果")
-        finally:
-            db.close()
+        exam = db.query(Exam).filter_by(task_id=task_id).first()
+        if exam:
+            if not user.is_admin and exam.user_id != user.id:
+                raise HTTPException(403, "无权下载该任务的结果")
+            result = _load_analysis_result(exam.result_json)
+            record = db.query(DictModel).filter_by(exam_id=exam.id).order_by(DictModel.created_at.desc()).first()
+            if record:
+                result.vocab_table = [VocabEntry.model_validate(item) for item in json.loads(record.vocab_json)]
+        else:
+            raise HTTPException(400, "没有可导出的完整结果")
     else:
         if task.status != "done":
             raise HTTPException(400, "没有可导出的完整结果")
@@ -941,16 +998,14 @@ async def delete_vocab_entry(
     if not task or not task.result:
         raise HTTPException(404, "任务不存在")
 
+    if not _user_owns_task(task_id, user, db):
+        raise HTTPException(403, "没有权限删除该词汇")
     meta = _task_store.get_meta(task_id)
     exam = None
     if meta.get("exam_id"):
         exam = db.query(Exam).filter_by(id=meta["exam_id"]).first()
     if exam is None:
         exam = db.query(Exam).filter_by(task_id=task_id).first()
-    if exam and not user.is_admin and exam.user_id != user.id:
-        raise HTTPException(403, "没有权限删除该词汇")
-    if exam is None and not user.is_admin and meta.get("user_id") != user.id:
-        raise HTTPException(403, "没有权限删除该词汇")
 
     original_len = len(task.result.vocab_table)
     task.result.vocab_table = [
