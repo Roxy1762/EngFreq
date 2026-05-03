@@ -19,11 +19,18 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY requirements.txt .
 RUN pip install --prefix=/install -r requirements.txt
 
-# Prebake spaCy + NLTK resources into the image so cold start doesn't download
+# Prebake spaCy model into /install so it gets copied to the runtime stage.
+# python -m spacy download installs to the *system* Python's site-packages via
+# pip — not to our /install prefix — so we derive the correct wheel URL from
+# the installed spaCy version and use pip install --prefix=/install directly.
+RUN SPACY_VER=$(PYTHONPATH=/install/lib/python3.12/site-packages \
+        python -c "import spacy; print(spacy.__version__)") \
+ && pip install --prefix=/install --no-deps \
+    "https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-${SPACY_VER}/en_core_web_sm-${SPACY_VER}-py3-none-any.whl"
+
+# Prebake NLTK corpora into /install/nltk_data (copied to runtime via COPY below)
 RUN PYTHONPATH=/install/lib/python3.12/site-packages \
-    python -m spacy download en_core_web_sm --direct \
- && PYTHONPATH=/install/lib/python3.12/site-packages \
-    python -c "import nltk; [nltk.download(p, quiet=True, download_dir='/install/nltk_data') for p in ('wordnet','averaged_perceptron_tagger','punkt','stopwords')]"
+    python -c "import nltk; [nltk.download(p, quiet=True, download_dir='/install/nltk_data') for p in ('wordnet','averaged_perceptron_tagger','punkt','punkt_tab','stopwords')]"
 
 
 # ─── Runtime stage ────────────────────────────────────────────────────────────

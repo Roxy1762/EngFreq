@@ -2,16 +2,18 @@
 from __future__ import annotations
 
 import os
+import pathlib
 import secrets
 import string
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 from jose import JWTError, jwt
 from passlib.context import CryptContext
 
 # ── Secret key: read from env, or persist in a local file ────────────────────
-_KEY_FILE = "secret.key"
+# Anchor to the project root so the same key is used regardless of cwd.
+_KEY_FILE = str(pathlib.Path(__file__).parent.parent / "secret.key")
 if not os.path.exists(_KEY_FILE):
     _generated = secrets.token_hex(32)
     # Open with 0600 so the JWT signing key isn't world-readable when
@@ -49,7 +51,7 @@ def verify_password(plain: str, hashed: str) -> bool:
 # ── JWT ───────────────────────────────────────────────────────────────────────
 
 def create_token(user_id: int, username: str, is_admin: bool) -> str:
-    expire = datetime.utcnow() + timedelta(hours=TOKEN_HOURS)
+    expire = datetime.now(timezone.utc) + timedelta(hours=TOKEN_HOURS)
     return jwt.encode(
         {"sub": str(user_id), "username": username, "is_admin": is_admin, "exp": expire},
         SECRET_KEY,

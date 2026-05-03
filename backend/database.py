@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import os
 import sqlite3
-from datetime import datetime
+from datetime import datetime, timezone
 
 from sqlalchemy import (
     Boolean,
@@ -14,14 +14,34 @@ from sqlalchemy import (
     String,
     Text,
     create_engine,
+    event as _sa_event,
 )
 from sqlalchemy.orm import declarative_base, relationship, sessionmaker
 
 DB_PATH = os.environ.get("DB_PATH", "app.db")
+
+
+def _set_sqlite_pragmas(dbapi_conn, _connection_record):
+    """Enable WAL mode and a short busy timeout on every new connection.
+
+    WAL (Write-Ahead Logging) allows readers and writers to coexist without
+    blocking each other — critical for FastAPI's async request handlers running
+    alongside background analysis tasks.  The busy timeout prevents the
+    "database is locked" OperationalError when a second write arrives while
+    the first is still in progress.
+    """
+    cursor = dbapi_conn.cursor()
+    cursor.execute("PRAGMA journal_mode=WAL")
+    cursor.execute("PRAGMA busy_timeout=5000")   # ms
+    cursor.execute("PRAGMA synchronous=NORMAL")   # safe with WAL; faster than FULL
+    cursor.close()
+
+
 engine = create_engine(
     f"sqlite:///{DB_PATH}",
     connect_args={"check_same_thread": False},
 )
+_sa_event.listen(engine, "connect", _set_sqlite_pragmas)
 SessionLocal = sessionmaker(bind=engine, autocommit=False, autoflush=False)
 Base = declarative_base()
 
@@ -36,7 +56,7 @@ class User(Base):
     email = Column(String(128), nullable=True)
     display_name = Column(String(64), nullable=True)
     preferred_provider = Column(String(32), nullable=True)
-    created_at = Column(DateTime, default=datetime.utcnow)
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
 
     exams = relationship("Exam", back_populates="user", cascade="all, delete-orphan")
     dicts = relationship("Dict", back_populates="user", cascade="all, delete-orphan")
@@ -55,7 +75,7 @@ class Exam(Base):
     raw_parse_result_json = Column(Text, nullable=True)
     is_combined = Column(Boolean, default=False)         # True for multi-exam aggregations
     source_exam_codes = Column(Text, nullable=True)      # JSON array of source exam codes
-    created_at = Column(DateTime, default=datetime.utcnow)
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
 
     user = relationship("User", back_populates="exams")
     dicts = relationship("Dict", back_populates="exam")
@@ -71,7 +91,7 @@ class Dict(Base):
     filename = Column(String(256), nullable=False, default="")
     dict_code = Column(String(12), unique=True, nullable=False, index=True)
     vocab_json = Column(Text, nullable=False)
-    created_at = Column(DateTime, default=datetime.utcnow)
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
 
     user = relationship("User", back_populates="dicts")
     exam = relationship("Exam", back_populates="dicts")
@@ -83,7 +103,7 @@ class AppSetting(Base):
     id = Column(Integer, primary_key=True, index=True)
     key = Column(String(64), unique=True, nullable=False, index=True)
     value_json = Column(Text, nullable=False, default="{}")
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    updated_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
 
 
 def get_db():
