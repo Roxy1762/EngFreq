@@ -116,7 +116,7 @@ if ((BOOTSTRAP)); then
   if ! "$PYTHON" -c "import spacy; spacy.load('en_core_web_sm')" >/dev/null 2>&1; then
     "$PYTHON" -m spacy download en_core_web_sm
   fi
-  "$PYTHON" -c "import nltk; [nltk.download(pkg, quiet=True) for pkg in ('wordnet', 'averaged_perceptron_tagger', 'punkt', 'stopwords')]" >/dev/null 2>&1 || true
+  "$PYTHON" -c "import nltk; [nltk.download(pkg, quiet=True) for pkg in ('wordnet', 'averaged_perceptron_tagger', 'punkt', 'punkt_tab', 'stopwords')]" >/dev/null 2>&1 || true
 fi
 
 if ((INSTALL_ONLY)); then
@@ -124,5 +124,11 @@ if ((INSTALL_ONLY)); then
   exit 0
 fi
 
-echo "[INFO] Starting server on http://127.0.0.1:8000"
+# Resolve displayed port from .env (fallback to 8000)
+_display_port=8000
+if [[ -f "$APP_DIR/.env" ]]; then
+  _p="$(grep -E '^PORT=[0-9]+' "$APP_DIR/.env" | tail -1 | cut -d= -f2)"
+  [[ -n "$_p" ]] && _display_port="$_p"
+fi
+echo "[INFO] Starting server on http://127.0.0.1:${_display_port}"
 exec "$PYTHON" run.py --prod

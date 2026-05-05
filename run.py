@@ -18,7 +18,13 @@ except ModuleNotFoundError as exc:
 
 if __name__ == "__main__":
     prod = "--prod" in sys.argv
-    workers = 1 if (not prod or os.name == "nt") else 4
+
+    # The application uses an in-memory TaskStore that is process-local, so
+    # multiple workers would each have their own isolated task map — a task
+    # submitted to worker A would not be visible when worker B handles the poll
+    # request, causing spurious 404s.  FastAPI + asyncio already handles high
+    # concurrency within a single event loop, so one worker is sufficient.
+    workers = 1
 
     uvicorn.run(
         "backend.main:app",

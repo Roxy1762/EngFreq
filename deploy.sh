@@ -18,6 +18,12 @@ set -euo pipefail
 APP_DIR="$(cd "$(dirname "$0")" && pwd)"
 PID_FILE="$APP_DIR/data/server.pid"
 LOG_FILE="$APP_DIR/data/server.log"
+
+# Resolve PORT: prefer env var → .env file → default 8000
+if [[ -z "${PORT:-}" ]] && [[ -f "$APP_DIR/.env" ]]; then
+  _env_port="$(grep -E '^PORT=[0-9]+' "$APP_DIR/.env" | tail -1 | cut -d= -f2)"
+  PORT="${_env_port:-8000}"
+fi
 PORT="${PORT:-8000}"
 HEALTHCHECK_URL="${HEALTHCHECK_URL:-http://127.0.0.1:${PORT}/healthz}"
 
