@@ -37,6 +37,7 @@ def _build_registry() -> dict[str, type[BaseVocabProvider]]:
     _try_register(registry, "merriam_webster", "backend.providers.merriam_webster_provider",    "MerriamWebsterProvider")
     _try_register(registry, "youdao",          "backend.providers.youdao_provider",             "YoudaoProvider")
     _try_register(registry, "ecdict",          "backend.providers.ecdict_provider",             "ECDICTProvider")
+    _try_register(registry, "iciba",           "backend.providers.iciba_provider",              "ICIBAProvider")
 
     return registry
 

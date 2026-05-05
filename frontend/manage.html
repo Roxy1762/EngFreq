@@ -215,6 +215,10 @@ body { font-family: "Segoe UI", "PingFang SC", "Microsoft YaHei", system-ui, san
       <button class="nav-item" onclick="nav('analysis-defaults')"><span class="icon">⚖️</span>分析默认值</button>
       <button class="nav-item" onclick="nav('storage')"><span class="icon">🗄️</span>存储管理</button>
 
+      <div class="nav-group">词典 / 复习</div>
+      <button class="nav-item" onclick="nav('lookup')"><span class="icon">🔎</span>在线查词联调</button>
+      <button class="nav-item" onclick="nav('dict-cache')"><span class="icon">📦</span>词典缓存</button>
+
       <div class="nav-group">用户</div>
       <button class="nav-item" onclick="nav('users')"><span class="icon">👥</span>用户管理</button>
       <button class="nav-item" onclick="nav('system')"><span class="icon">🖥️</span>系统信息</button>
@@ -674,6 +678,35 @@ body { font-family: "Segoe UI", "PingFang SC", "Microsoft YaHei", system-ui, san
         </div>
       </div>
 
+      <!-- ── Live Lookup ── -->
+      <div class="section" id="sec-lookup">
+        <div class="section-header">
+          <div><h2>🔎 在线查词联调</h2><p>对任意单词触发多源词典并发查询，验证 API 配置是否生效</p></div>
+        </div>
+        <div class="card">
+          <div style="display:flex;gap:.5rem;flex-wrap:wrap;align-items:center;margin-bottom:.75rem">
+            <input id="lookup-word-mg" type="text" class="input" placeholder="例如：eloquent" style="flex:1;min-width:240px;padding:.5rem .75rem;border:1px solid var(--border);border-radius:6px" />
+            <button class="btn btn-primary" onclick="doLookupTestMg()">查询</button>
+          </div>
+          <div id="lookup-sources-mg" style="display:flex;flex-wrap:wrap;gap:.4rem;margin-bottom:.75rem"></div>
+          <div id="lookup-out-mg"></div>
+        </div>
+      </div>
+
+      <!-- ── Dict Cache ── -->
+      <div class="section" id="sec-dict-cache">
+        <div class="section-header">
+          <div><h2>📦 词典缓存</h2><p>多源词典共享的本地缓存（默认 30 天 TTL）</p></div>
+        </div>
+        <div class="card">
+          <div style="display:flex;gap:.5rem;flex-wrap:wrap;margin-bottom:.75rem">
+            <button class="btn btn-ghost" onclick="loadDictCacheMg()">🔄 刷新</button>
+            <button class="btn btn-danger" onclick="clearDictCacheMg()">🗑️ 全部清空</button>
+          </div>
+          <div id="dict-cache-mg">加载中…</div>
+        </div>
+      </div>
+
       <!-- ── System ── -->
       <div class="section" id="sec-system">
         <div class="section-header">
@@ -761,6 +794,7 @@ const SECTION_TITLES = {
   'ocr-settings': '🔍 OCR 设置', 'ocr-cache': '💾 OCR 缓存',
   'ocr-test': '🧪 OCR 测试', 'analysis-defaults': '⚖️ 分析默认值',
   storage: '🗄️ 存储管理', users: '👥 用户管理', system: '🖥️ 系统信息',
+  lookup: '🔎 在线查词联调', 'dict-cache': '📦 词典缓存',
 };
 
 function nav(id) {
@@ -789,6 +823,73 @@ function loadSection(id) {
   else if (id === 'storage') loadStorage();
   else if (id === 'users') loadUsers();
   else if (id === 'system') loadSystem();
+  else if (id === 'lookup') loadLookupMg();
+  else if (id === 'dict-cache') loadDictCacheMg();
+}
+
+// ── Live lookup (manage.html) ────────────────────────────────────────────────
+let _lookupSrcMg = null;
+async function loadLookupMg() {
+  try {
+    if (!_lookupSrcMg) {
+      _lookupSrcMg = await api('GET','/api/lookup/sources');
+    }
+    const def = new Set((_lookupSrcMg && _lookupSrcMg.default) || []);
+    const row = document.getElementById('lookup-sources-mg');
+    row.innerHTML = ((_lookupSrcMg && _lookupSrcMg.available)||[]).map(s =>
+      `<label style="cursor:pointer;padding:.18rem .55rem;border:1px solid var(--border);border-radius:999px;font-size:.82rem">
+         <input type="checkbox" class="lookup-src-mg" value="${s}"${def.has(s)?' checked':''} style="margin-right:.3rem"/>${s}
+       </label>`
+    ).join('');
+  } catch(e) { document.getElementById('lookup-out-mg').innerHTML = '<div style="color:var(--danger)">'+e.message+'</div>'; }
+}
+
+async function doLookupTestMg() {
+  const word = document.getElementById('lookup-word-mg').value.trim();
+  const out = document.getElementById('lookup-out-mg');
+  if (!word) { out.innerHTML = '<div>请输入要查询的单词</div>'; return; }
+  const sources = Array.from(document.querySelectorAll('.lookup-src-mg:checked')).map(el=>el.value);
+  out.innerHTML = '<div style="color:var(--muted)">查询中…</div>';
+  const data = await api('POST','/admin/dict-lookup-test', {word, sources});
+  if (!data) return;
+  out.innerHTML = (data.results||[]).map(r => {
+    const result = r.result || {};
+    return `<div style="border:1px solid var(--border);border-radius:8px;padding:.75rem;margin-bottom:.5rem">
+      <div style="display:flex;justify-content:space-between"><strong>${r.source}</strong>
+        <span style="color:${r.ok?'var(--success)':'var(--danger)'};font-size:.85rem">${r.ok?'命中':'未命中'} · ${r.latency_ms||0}ms</span>
+      </div>
+      ${r.error?'<div style="color:var(--danger);font-size:.85rem">'+r.error+'</div>':''}
+      ${result.chinese_meaning?'<div><b>中文：</b>'+result.chinese_meaning+'</div>':''}
+      ${result.english_definition?'<div><b>EN：</b>'+result.english_definition+'</div>':''}
+      ${result.example_sentence?'<div style="font-style:italic;color:var(--muted)">'+result.example_sentence+'</div>':''}
+      ${result.notes?'<div style="font-family:monospace;font-size:.8rem;color:var(--muted)">'+result.notes+'</div>':''}
+    </div>`;
+  }).join('') || '<div style="color:var(--muted)">无结果</div>';
+}
+
+async function loadDictCacheMg() {
+  const el = document.getElementById('dict-cache-mg');
+  el.innerHTML = '加载中…';
+  const data = await api('GET','/admin/dict-cache');
+  if (!data) return;
+  const bySrc = data.by_source || {};
+  el.innerHTML =
+    `<div>缓存总数：<strong>${data.total||0}</strong> 条</div>`
+    + `<div style="margin-top:.5rem;display:flex;flex-wrap:wrap;gap:.5rem">`
+    + (Object.entries(bySrc).map(([k,v]) =>
+       `<span style="border:1px solid var(--border);padding:.18rem .5rem;border-radius:999px">${k} · ${v}
+          <button class="btn btn-sm" style="margin-left:.4rem;padding:0 .4rem" onclick="clearDictCacheMg('${k}')">清</button>
+        </span>`).join('') || '<span style="color:var(--muted)">（暂无缓存）</span>')
+    + '</div>'
+    + `<div style="margin-top:.5rem;font-size:.78rem;color:var(--muted)">${data.db_path||''}</div>`;
+}
+
+async function clearDictCacheMg(source) {
+  const confirmMsg = source ? '确认清空 '+source+' 词典缓存？' : '确认清空所有词典缓存？';
+  if (!confirm(confirmMsg)) return;
+  const url = source ? '/admin/dict-cache?source='+encodeURIComponent(source) : '/admin/dict-cache';
+  await api('DELETE', url);
+  loadDictCacheMg();
 }
 
 // ── Toast ─────────────────────────────────────────────────────────────────────

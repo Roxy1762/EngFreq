@@ -152,6 +152,59 @@ class AnalysisResult(BaseModel):
     source_exam_codes: List[str] = Field(default_factory=list)  # exam codes combined
 
 
+# ── Live lookup ──────────────────────────────────────────────────────────────
+
+class LookupRequest(BaseModel):
+    word: str = Field(..., min_length=1, max_length=64)
+    sources: Optional[List[str]] = None    # which providers to query; None = all available
+    refresh: bool = False                  # bypass dict cache when True
+
+
+# ── Personal vocabulary library ──────────────────────────────────────────────
+
+class LibraryAddRequest(BaseModel):
+    headword: str = Field(..., min_length=1, max_length=64)
+    lemma: Optional[str] = None
+    pos: Optional[str] = None
+    chinese_meaning: Optional[str] = None
+    english_definition: Optional[str] = None
+    example_sentence: Optional[str] = None
+    notes: Optional[str] = None
+    tags: Optional[str] = None
+    source: Optional[str] = None
+    source_exam_code: Optional[str] = None
+    word_level: Optional[str] = None
+    cefr_level: Optional[str] = None
+    zipf_score: Optional[float] = None
+
+
+class LibraryBulkAddRequest(BaseModel):
+    """Push one or more dict-code entries (or arbitrary VocabEntry rows) into the library."""
+    dict_code: Optional[str] = None
+    headwords: Optional[List[str]] = None         # restrict to these (else all selected=True)
+    entries: Optional[List[LibraryAddRequest]] = None  # ad-hoc entries (e.g. from live lookup)
+
+
+class LibraryUpdateRequest(BaseModel):
+    chinese_meaning: Optional[str] = None
+    english_definition: Optional[str] = None
+    example_sentence: Optional[str] = None
+    notes: Optional[str] = None
+    tags: Optional[str] = None
+
+
+# ── Spaced repetition review ─────────────────────────────────────────────────
+
+class ReviewFeedback(BaseModel):
+    """User self-rating after seeing a card."""
+    headword: str = Field(..., min_length=1, max_length=64)
+    quality: str = Field(..., pattern="^(remembered|fuzzy|forgot)$")
+
+
+class ReviewSubmitRequest(BaseModel):
+    feedback: List[ReviewFeedback] = Field(..., min_length=1, max_length=200)
+
+
 class TaskStatus(BaseModel):
     task_id: str
     status: str           # pending | processing | done | error

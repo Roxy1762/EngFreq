@@ -229,6 +229,9 @@ tr:hover td { background: #f8fafc; }
       <button class="nav-item" onclick="nav('ocr',this)" data-section="ocr">
         <span class="icon">🔬</span><span>OCR 测试</span>
       </button>
+      <button class="nav-item" onclick="nav('lookup',this)" data-section="lookup">
+        <span class="icon">🔎</span><span>在线查词</span>
+      </button>
       <button class="nav-item" onclick="nav('system',this)" data-section="system">
         <span class="icon">🖥️</span><span>系统信息</span>
       </button>
@@ -321,6 +324,31 @@ tr:hover td { background: #f8fafc; }
             </div>
             <div class="ocr-result" id="ocr-result-text"></div>
           </div>
+        </div>
+      </div>
+
+      <!-- ── Live dict lookup tester ── -->
+      <div class="section" id="sec-lookup">
+        <div class="card">
+          <div class="card-title">在线查词联调（多源聚合）</div>
+          <p style="font-size:.85rem;color:var(--muted);margin-bottom:.75rem">
+            一次查询会并发调用所有勾选的词典源（iciba / free_dict / merriam_webster / youdao / ecdict），
+            返回各源的命中情况和耗时，用于核对 API 配置是否生效。
+          </p>
+          <div style="display:flex;flex-wrap:wrap;gap:.5rem;align-items:center;margin-bottom:.75rem">
+            <input class="cfg-input" id="lookup-word" type="text" placeholder="输入英文单词 (如: eloquent)"
+                   style="flex:1;min-width:240px" />
+            <button class="btn btn-primary" onclick="doLookupTest()">查询</button>
+          </div>
+          <div id="lookup-sources-row" style="display:flex;flex-wrap:wrap;gap:.4rem;margin-bottom:1rem"></div>
+          <div id="lookup-result"></div>
+        </div>
+        <div class="card">
+          <div class="card-title">词典缓存
+            <button class="btn btn-outline btn-sm" onclick="loadDictCacheStats()">刷新</button>
+            <button class="btn btn-danger btn-sm" onclick="clearDictCache()">全部清空</button>
+          </div>
+          <div id="dict-cache-stats" style="font-size:.88rem">加载中…</div>
         </div>
       </div>
 
@@ -461,6 +489,7 @@ async function loadSection(s) {
   else if (s === 'users') await loadUsers();
   else if (s === 'codes') await loadCodes();
   else if (s === 'config') await loadConfig();
+  else if (s === 'lookup') await loadLookup();
   else if (s === 'system') await loadSystem();
 }
 
@@ -814,6 +843,34 @@ async function loadConfig() {
             <input class="cfg-input" id="cfg-dict-ecdict-path" type="text"
               value="${esc(cfg.dict_providers?.ecdict_path||'')}" placeholder="/data/ecdict.db" />
           </div>
+          <p style="font-size:.78rem;color:var(--muted);margin-top:.5rem">
+            iCIBA（爱词霸）已默认开启，无需密钥；可在“在线查词”页面联调验证。
+          </p>
+        </div>
+
+        <div class="settings-card">
+          <h3>在线查词 / 生词本 / 复习</h3>
+          <div class="toggle-field"><label>
+            <b>启用在线查词</b>
+            <span style="display:block;font-size:.75rem;color:var(--muted);font-weight:400">
+              用户可对任意单词调用多源词典聚合（iciba / free_dict / ecdict / 有道 / MW）
+            </span>
+          </label><label class="switch"><input id="cfg-live-lookup" type="checkbox"${cfg.live_lookup_enabled?' checked':''} /><span class="slider"></span></label></div>
+          <div class="field"><label>默认查词来源（逗号分隔，按顺序排列）</label>
+            <input class="cfg-input" id="cfg-lookup-sources" type="text"
+              value="${esc((cfg.live_lookup_sources||[]).join(','))}"
+              placeholder="iciba,free_dict,ecdict" />
+          </div>
+          <div class="field"><label>词典缓存有效期（天）</label>
+            <input class="cfg-input" id="cfg-dict-cache-ttl" type="number" min="0" max="365"
+              value="${cfg.dict_cache_ttl_days??30}" />
+          </div>
+          <div class="toggle-field"><label>启用个人生词本</label>
+            <label class="switch"><input id="cfg-library-enabled" type="checkbox"${cfg.library_enabled?' checked':''} /><span class="slider"></span></label>
+          </div>
+          <div class="toggle-field"><label>启用间隔复习（Leitner）</label>
+            <label class="switch"><input id="cfg-review-enabled" type="checkbox"${cfg.review_enabled?' checked':''} /><span class="slider"></span></label>
+          </div>
         </div>
 
       </div>
@@ -908,6 +965,12 @@ async function saveConfig() {
       backend: g('cfg-text-cleaner-backend').value,
       context_hint: g('cfg-text-cleaner-hint').value.trim(),
     },
+    live_lookup_enabled: g('cfg-live-lookup') ? g('cfg-live-lookup').checked : true,
+    live_lookup_sources: (g('cfg-lookup-sources')?.value || '')
+      .split(',').map(s => s.trim()).filter(Boolean),
+    dict_cache_ttl_days: Number(g('cfg-dict-cache-ttl')?.value || 30),
+    library_enabled: g('cfg-library-enabled') ? g('cfg-library-enabled').checked : true,
+    review_enabled: g('cfg-review-enabled') ? g('cfg-review-enabled').checked : true,
     llm: llmCfg,
   };
   try {
@@ -945,6 +1008,108 @@ async function handleOcrFile(file) {
 function copyOcrText() {
   const text = document.getElementById('ocr-result-text').textContent;
   navigator.clipboard.writeText(text).then(() => alert('已复制到剪贴板'));
+}
+
+// ── Live Dict Lookup ──
+let _lookupSourcesCache = null;
+
+async function loadLookup() {
+  try {
+    if (!_lookupSourcesCache) {
+      const resp = await apiFetch('/api/lookup/sources');
+      const data = await resp.json();
+      _lookupSourcesCache = data;
+    }
+    const row = document.getElementById('lookup-sources-row');
+    const def = new Set(_lookupSourcesCache.default || []);
+    row.innerHTML = (_lookupSourcesCache.available||[]).map(s => `
+      <label class="chip" style="cursor:pointer;padding:.2rem .55rem;border:1px solid var(--border);border-radius:999px">
+        <input type="checkbox" class="lookup-src" value="${esc(s)}"${def.has(s)?' checked':''} style="margin-right:.3rem"/>
+        ${esc(s)}
+      </label>`).join('');
+    if (!_lookupSourcesCache.enabled) {
+      document.getElementById('lookup-result').innerHTML =
+        '<div style="color:var(--danger)">⚠️ 在线查词功能在系统配置中被关闭</div>';
+    }
+    await loadDictCacheStats();
+  } catch(e) {
+    document.getElementById('lookup-result').innerHTML = `<div style="color:var(--danger)">${e.message}</div>`;
+  }
+}
+
+async function doLookupTest() {
+  const word = document.getElementById('lookup-word').value.trim();
+  const out = document.getElementById('lookup-result');
+  if (!word) { out.innerHTML = '<div style="color:var(--muted)">请输入要查询的单词</div>'; return; }
+  const sources = Array.from(document.querySelectorAll('.lookup-src:checked')).map(el=>el.value);
+  out.innerHTML = '<div class="loading">查询中…</div>';
+  try {
+    const resp = await apiFetch('/admin/dict-lookup-test', {
+      method: 'POST',
+      body: JSON.stringify({word, sources})
+    });
+    const data = await resp.json();
+    if (!resp.ok) throw new Error(data.detail || '查询失败');
+    out.innerHTML = (data.results || []).map(r => {
+      const result = r.result || {};
+      const cn = result.chinese_meaning || '';
+      const en = result.english_definition || '';
+      const ex = result.example_sentence || '';
+      const notes = result.notes || '';
+      const flag = r.ok ? '<span class="chip chip-ok">命中</span>' : '<span class="chip chip-warn">未命中</span>';
+      return `
+        <div class="card" style="margin-bottom:.75rem">
+          <div style="display:flex;justify-content:space-between;align-items:center">
+            <strong>${esc(r.source)}</strong>
+            <span style="font-size:.78rem;color:var(--muted)">${flag} ${r.latency_ms||0}ms</span>
+          </div>
+          ${r.error ? `<div style="color:var(--danger);font-size:.85rem;margin-top:.4rem">✗ ${esc(r.error)}</div>` : ''}
+          ${cn ? `<div style="margin-top:.4rem"><strong>中文：</strong>${esc(cn)}</div>` : ''}
+          ${en ? `<div><strong>English:</strong> ${esc(en)}</div>` : ''}
+          ${ex ? `<div style="font-style:italic;color:var(--muted);margin-top:.2rem">例句：${esc(ex)}</div>` : ''}
+          ${notes ? `<div style="font-family:monospace;font-size:.8rem;color:var(--muted)">${esc(notes)}</div>` : ''}
+          ${result.pos ? `<div style="font-size:.8rem;color:var(--muted)">POS: ${esc(result.pos)}</div>` : ''}
+        </div>`;
+    }).join('') || '<div style="color:var(--muted)">没有结果</div>';
+  } catch(e) {
+    out.innerHTML = `<div style="color:var(--danger)">${e.message}</div>`;
+  }
+}
+
+async function loadDictCacheStats() {
+  const el = document.getElementById('dict-cache-stats');
+  if (!el) return;
+  try {
+    const resp = await apiFetch('/admin/dict-cache');
+    const data = await resp.json();
+    if (!resp.ok) throw new Error(data.detail || '加载失败');
+    const bySrc = data.by_source || {};
+    el.innerHTML = `
+      <div>缓存条目总数：<strong>${data.total||0}</strong></div>
+      <div style="font-size:.78rem;color:var(--muted);margin-top:.25rem">DB: ${esc(data.db_path||'')}</div>
+      <div style="margin-top:.5rem;display:flex;flex-wrap:wrap;gap:.4rem">
+        ${Object.entries(bySrc).map(([k,v]) =>
+          `<span class="chip" style="border:1px solid var(--border);padding:.18rem .5rem;border-radius:999px">
+             ${esc(k)} · ${v}
+             <button class="btn btn-sm" style="margin-left:.4rem;padding:.05rem .35rem"
+                     onclick="clearDictCache('${esc(k)}')">清空</button>
+           </span>`).join('') || '<span style="color:var(--muted)">（暂无缓存）</span>'}
+      </div>`;
+  } catch(e) {
+    el.innerHTML = `<span style="color:var(--danger)">${e.message}</span>`;
+  }
+}
+
+async function clearDictCache(source) {
+  const confirmMsg = source ? `确认清空 ${source} 词典缓存？` : '确认清空所有词典缓存？';
+  if (!confirm(confirmMsg)) return;
+  try {
+    const url = source ? `/admin/dict-cache?source=${encodeURIComponent(source)}` : '/admin/dict-cache';
+    const resp = await apiFetch(url, {method:'DELETE'});
+    const data = await resp.json();
+    if (!resp.ok) throw new Error(data.detail || '清除失败');
+    await loadDictCacheStats();
+  } catch(e) { alert(e.message); }
 }
 
 // ── System ──
