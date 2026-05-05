@@ -384,11 +384,19 @@ def _bearer_payload(request: Request) -> Optional[dict]:
     return None
 
 
+def _payload_user_id(payload: dict) -> int:
+    """Extract numeric user id from a JWT payload. Raises 401 if malformed."""
+    try:
+        return int(payload["sub"])
+    except (KeyError, TypeError, ValueError):
+        raise HTTPException(401, "登录凭证无效，请重新登录")
+
+
 def get_current_user(request: Request, db: Session = Depends(get_db)) -> User:
     payload = _bearer_payload(request)
     if not payload:
         raise HTTPException(401, "未登录或 token 已过期，请先登录")
-    user = db.query(User).filter_by(id=int(payload["sub"])).first()
+    user = db.query(User).filter_by(id=_payload_user_id(payload)).first()
     if not user:
         raise HTTPException(401, "用户不存在")
     return user
@@ -621,6 +629,8 @@ async def update_profile(
     db: Session = Depends(get_db),
 ):
     db_user = db.query(User).filter_by(id=user.id).first()
+    if db_user is None:
+        raise HTTPException(401, "用户不存在")
     if body.email is not None:
         db_user.email = body.email
     if body.display_name is not None:
@@ -640,6 +650,8 @@ async def change_password(
     db: Session = Depends(get_db),
 ):
     db_user = db.query(User).filter_by(id=user.id).first()
+    if db_user is None:
+        raise HTTPException(401, "用户不存在")
     if not verify_password(body.old_password, db_user.password_hash):
         raise HTTPException(400, "原密码不正确")
     db_user.password_hash = hash_password(body.new_password)
@@ -670,7 +682,7 @@ async def analyze(
     payload = _bearer_payload(request)
     if not payload:
         raise HTTPException(401, "请先登录后再上传试卷")
-    user = db.query(User).filter_by(id=int(payload["sub"])).first()
+    user = db.query(User).filter_by(id=_payload_user_id(payload)).first()
     if not user:
         raise HTTPException(401, "用户不存在")
 
@@ -759,7 +771,7 @@ async def generate_vocab_endpoint(
     payload = _bearer_payload(request)
     if not payload:
         raise HTTPException(401, "请先登录")
-    user = db.query(User).filter_by(id=int(payload["sub"])).first()
+    user = db.query(User).filter_by(id=_payload_user_id(payload)).first()
     if not user:
         raise HTTPException(401, "用户不存在")
 
@@ -857,7 +869,7 @@ async def export_results(
         payload = decode_token(token)
     if not payload:
         raise HTTPException(401, "请先登录后再下载")
-    user = db.query(User).filter_by(id=int(payload["sub"])).first()
+    user = db.query(User).filter_by(id=_payload_user_id(payload)).first()
     if not user:
         raise HTTPException(401, "用户不存在")
 
@@ -1044,35 +1056,38 @@ async def combine_exams(
     """Aggregate word frequencies from multiple existing exams and optionally generate vocab."""
     from backend.services.wordlist_service import tag_vocab_entries
 
+    # Dedup the input list while preserving order — duplicate codes were silently
+    # double-counting before, inflating scores for combined results.
+    seen_codes: set[str] = set()
+    unique_codes: list[str] = []
+    for raw in body.exam_codes:
+        code = raw.upper()
+        if code in seen_codes:
+            continue
+        seen_codes.add(code)
+        unique_codes.append(code)
+
     exams = []
-    for code in body.exam_codes:
-        exam = db.query(Exam).filter_by(exam_code=code.upper()).first()
+    for code in unique_codes:
+        exam = db.query(Exam).filter_by(exam_code=code).first()
         if not exam:
             raise HTTPException(404, f"试卷码 {code} 不存在")
         if not user.is_admin and exam.user_id != user.id:
             raise HTTPException(403, f"无权访问试卷 {code}")
         exams.append(exam)
 
-    # Aggregate lemma frequencies across all exams
+    # Aggregate lemma frequencies across all exams.
+    # Mutate-in-place pattern (vs. rebuilding LemmaEntry per iteration) is O(n)
+    # in surface forms instead of O(n²) and avoids per-row Pydantic re-validation
+    # — large combined inputs benefit measurably.
     combined: dict[str, LemmaEntry] = {}
+    surface_sets: dict[str, set[str]] = {}
     for exam in exams:
         result = _load_analysis_result(exam.result_json)
         for lemma in result.lemma_table:
             key = lemma.lemma.lower()
-            if key in combined:
-                existing = combined[key]
-                combined[key] = LemmaEntry(
-                    lemma=existing.lemma,
-                    pos=existing.pos or lemma.pos,
-                    family_id=existing.family_id or lemma.family_id,
-                    surface_forms=list(set(existing.surface_forms + lemma.surface_forms)),
-                    body_count=existing.body_count + lemma.body_count,
-                    stem_count=existing.stem_count + lemma.stem_count,
-                    option_count=existing.option_count + lemma.option_count,
-                    total_count=existing.total_count + lemma.total_count,
-                    score=existing.score + lemma.score,
-                )
-            else:
+            existing = combined.get(key)
+            if existing is None:
                 combined[key] = LemmaEntry(
                     lemma=lemma.lemma, pos=lemma.pos,
                     family_id=lemma.family_id,
@@ -1081,6 +1096,21 @@ async def combine_exams(
                     option_count=lemma.option_count, total_count=lemma.total_count,
                     score=lemma.score,
                 )
+                surface_sets[key] = set(lemma.surface_forms)
+            else:
+                existing.body_count += lemma.body_count
+                existing.stem_count += lemma.stem_count
+                existing.option_count += lemma.option_count
+                existing.total_count += lemma.total_count
+                existing.score += lemma.score
+                if not existing.pos and lemma.pos:
+                    existing.pos = lemma.pos
+                if not existing.family_id and lemma.family_id:
+                    existing.family_id = lemma.family_id
+                surface_sets[key].update(lemma.surface_forms)
+
+    for key, surfaces in surface_sets.items():
+        combined[key].surface_forms = sorted(surfaces)
 
     merged_lemmas = sorted(combined.values(), key=lambda x: x.score, reverse=True)
 
@@ -1442,6 +1472,33 @@ async def lookup_sources(
     }
 
 
+@app.get("/api/wordlists/check")
+async def check_word_level(
+    word: str = Query(..., min_length=1, max_length=64),
+    user: User = Depends(get_current_user),
+):
+    """Quick offline classification (level / CEFR / Zipf) for one word. No network call."""
+    from backend.services.wordlist_service import (
+        cefr_available,
+        get_cefr_level,
+        get_word_level,
+        is_gaokao_word,
+    )
+    from backend.services.basic_vocab import zipf_score
+
+    target = word.strip().lower()
+    if not target:
+        raise HTTPException(400, "请提供要查询的单词")
+    return {
+        "word": target,
+        "word_level": get_word_level(target),
+        "cefr_level": get_cefr_level(target),
+        "zipf_score": round(zipf_score(target), 2),
+        "in_gaokao_list": is_gaokao_word(target),
+        "cefr_high_quality": cefr_available(),
+    }
+
+
 # ── Feature 2: Personal word library (favorites / notebook) ──────────────────
 
 @app.get("/api/library")
@@ -1536,6 +1593,32 @@ async def library_delete(
     if not library_service.remove_library_word(db, user_id=user.id, word_id=word_id):
         raise HTTPException(404, "生词不存在")
     return {"ok": True}
+
+
+@app.get("/api/library/stats")
+async def library_stats_endpoint(
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Per-user library dashboard summary — counts by level, CEFR, source, top tags."""
+    runtime = get_runtime_config(db)
+    if not runtime.library_enabled:
+        raise HTTPException(403, "生词本功能已关闭")
+    from backend.services import library_service
+    return library_service.library_stats(db, user_id=user.id)
+
+
+@app.get("/api/library/tags")
+async def library_tags_endpoint(
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """All tags the user has applied to library entries (with counts) — drives tag autocomplete."""
+    runtime = get_runtime_config(db)
+    if not runtime.library_enabled:
+        raise HTTPException(403, "生词本功能已关闭")
+    from backend.services import library_service
+    return {"tags": library_service.list_tags(db, user_id=user.id)}
 
 
 @app.get("/api/library/export/{fmt}")
@@ -2077,6 +2160,37 @@ async def admin_test_provider(
         }
     except Exception as exc:
         return {"ok": False, "provider": provider_name, "error": str(exc)}
+
+
+# ── Admin: task store diagnostics ─────────────────────────────────────────────
+
+@app.get("/admin/tasks")
+async def admin_list_tasks(admin: User = Depends(get_admin_user)):
+    """In-memory task registry snapshot. Helpful when diagnosing stuck analyses."""
+    snap = _task_store.snapshot()
+    return {
+        "total": len(snap),
+        "by_status": {
+            status: sum(1 for t in snap if t["status"] == status)
+            for status in {t["status"] for t in snap}
+        } if snap else {},
+        "tasks": snap,
+    }
+
+
+@app.post("/admin/tasks/prune")
+async def admin_prune_tasks(
+    older_than_seconds: int = Query(3600, ge=0, le=7 * 24 * 3600),
+    admin: User = Depends(get_admin_user),
+):
+    """Drop finished tasks idle longer than the threshold. Live tasks are preserved."""
+    removed = _task_store.prune_older_than(older_than_seconds)
+    return {
+        "ok": True,
+        "removed": removed,
+        "remaining": _task_store.size(),
+        "older_than_seconds": older_than_seconds,
+    }
 
 
 # ── Admin panel SPA ───────────────────────────────────────────────────────────
