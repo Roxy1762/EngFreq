@@ -62,7 +62,12 @@ from backend.models.schemas import (
     ChangePasswordRequest,
     FilterConfig,
     LemmaEntry,
+    LibraryAddRequest,
+    LibraryBulkAddRequest,
+    LibraryUpdateRequest,
+    LookupRequest,
     MultiExamRequest,
+    ReviewSubmitRequest,
     TaskStatus,
     UserProfileUpdate,
     VocabEntry,
@@ -1387,6 +1392,280 @@ async def delete_dict(
     return {"ok": True, "dict_code": dict_code.upper()}
 
 
+# ── Feature 1: Live online word lookup ───────────────────────────────────────
+# Aggregates results from multiple registered dict providers (iciba, free_dict,
+# merriam_webster, youdao, ecdict). Persists nothing — just a quick query tool
+# for users who want to look up a single word during/after analysis.
+
+@app.post("/api/lookup")
+async def lookup_word(
+    body: LookupRequest,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    runtime = get_runtime_config(db)
+    if not runtime.live_lookup_enabled:
+        raise HTTPException(403, "在线查词功能已关闭，请联系管理员")
+
+    from backend.services.dict_lookup import lookup_word as _lookup
+    from backend.services import dict_cache
+
+    word = (body.word or "").strip()
+    if not word:
+        raise HTTPException(400, "请提供要查询的单词")
+
+    sources = body.sources or runtime.live_lookup_sources
+    if body.refresh:
+        for src in sources:
+            try:
+                dict_cache.clear(src)
+            except Exception:   # noqa: BLE001
+                pass
+
+    result = await _lookup(word, sources=sources)
+    return result
+
+
+@app.get("/api/lookup/sources")
+async def lookup_sources(
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Return available providers + the runtime default source order."""
+    from backend.services.dict_lookup import available_lookup_sources
+
+    runtime = get_runtime_config(db)
+    return {
+        "available": available_lookup_sources(),
+        "default": runtime.live_lookup_sources,
+        "enabled": runtime.live_lookup_enabled,
+    }
+
+
+# ── Feature 2: Personal word library (favorites / notebook) ──────────────────
+
+@app.get("/api/library")
+async def library_list(
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+    tag: Optional[str] = Query(None),
+    search: Optional[str] = Query(None),
+    limit: int = Query(200, ge=1, le=1000),
+    offset: int = Query(0, ge=0),
+):
+    runtime = get_runtime_config(db)
+    if not runtime.library_enabled:
+        raise HTTPException(403, "生词本功能已关闭")
+    from backend.services import library_service
+    return {
+        "items": library_service.list_library(
+            db, user_id=user.id, tag=tag, search=search, limit=limit, offset=offset,
+        ),
+    }
+
+
+@app.post("/api/library")
+async def library_add(
+    body: LibraryAddRequest,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    runtime = get_runtime_config(db)
+    if not runtime.library_enabled:
+        raise HTTPException(403, "生词本功能已关闭")
+    from backend.services import library_service
+    row, created = library_service.add_library_word(db, user_id=user.id, payload=body)
+    return {"ok": True, "created": created, "id": row.id, "headword": row.headword}
+
+
+@app.post("/api/library/bulk")
+async def library_bulk_add(
+    body: LibraryBulkAddRequest,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    runtime = get_runtime_config(db)
+    if not runtime.library_enabled:
+        raise HTTPException(403, "生词本功能已关闭")
+    from backend.services import library_service
+
+    if not body.dict_code and not body.entries:
+        raise HTTPException(400, "请提供 dict_code 或 entries")
+
+    summary: dict = {"created": 0, "updated": 0, "skipped": 0}
+    if body.dict_code:
+        try:
+            counts = library_service.bulk_add_from_dict(
+                db, user_id=user.id, dict_code=body.dict_code, headwords=body.headwords,
+            )
+        except ValueError as exc:
+            raise HTTPException(404, str(exc)) from exc
+        except PermissionError as exc:
+            raise HTTPException(403, str(exc)) from exc
+        for k in summary:
+            summary[k] += counts[k]
+    if body.entries:
+        for entry in body.entries:
+            _, created = library_service.add_library_word(db, user_id=user.id, payload=entry)
+            summary["created" if created else "updated"] += 1
+    return {"ok": True, **summary}
+
+
+@app.put("/api/library/{word_id}")
+async def library_update(
+    word_id: int,
+    body: LibraryUpdateRequest,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    from backend.services import library_service
+    fields = body.model_dump(exclude_none=True)
+    row = library_service.update_library_word(db, user_id=user.id, word_id=word_id, fields=fields)
+    if row is None:
+        raise HTTPException(404, "生词不存在")
+    return {"ok": True, "id": row.id}
+
+
+@app.delete("/api/library/{word_id}")
+async def library_delete(
+    word_id: int,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    from backend.services import library_service
+    if not library_service.remove_library_word(db, user_id=user.id, word_id=word_id):
+        raise HTTPException(404, "生词不存在")
+    return {"ok": True}
+
+
+@app.get("/api/library/export/{fmt}")
+async def library_export(
+    fmt: str,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Export the user's library to CSV/XLSX. Reuses the vocab export utilities."""
+    from backend.services import library_service
+    items = library_service.list_library(db, user_id=user.id, limit=10_000)
+    # Adapt LibraryWord rows into VocabEntry for the existing exporter.
+    vocab = []
+    for item in items:
+        vocab.append(
+            VocabEntry(
+                headword=item["headword"],
+                lemma=item["lemma"] or item["headword"],
+                pos=item.get("pos") or None,
+                chinese_meaning=item.get("chinese_meaning"),
+                english_definition=item.get("english_definition"),
+                example_sentence=item.get("example_sentence"),
+                notes=item.get("notes"),
+                source=item.get("source") or "library",
+                word_level=item.get("word_level"),
+                cefr_level=item.get("cefr_level"),
+                zipf_score=item.get("zipf_score"),
+            )
+        )
+    fake_result = AnalysisResult(
+        task_id="library-export",
+        filename="my-library",
+        vocab_table=vocab,
+    )
+    fmt = fmt.lower()
+    if fmt == "csv":
+        return Response(
+            content=to_csv(fake_result),
+            media_type="text/csv",
+            headers={"Content-Disposition": "attachment; filename=my_library.csv"},
+        )
+    if fmt == "xlsx":
+        return Response(
+            content=to_xlsx(fake_result),
+            media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            headers={"Content-Disposition": "attachment; filename=my_library.xlsx"},
+        )
+    raise HTTPException(400, "格式必须是 csv 或 xlsx")
+
+
+# ── Feature 3: Spaced-repetition review queue ────────────────────────────────
+
+@app.get("/api/review/queue")
+async def review_queue(
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+    limit: int = Query(30, ge=1, le=200),
+    include_future: bool = Query(False),
+):
+    runtime = get_runtime_config(db)
+    if not runtime.review_enabled:
+        raise HTTPException(403, "复习功能已关闭")
+    from backend.services import library_service
+    return {
+        "items": library_service.get_review_queue(
+            db, user_id=user.id, limit=limit, include_future=include_future,
+        ),
+    }
+
+
+@app.post("/api/review/enroll")
+async def review_enroll(
+    headwords: list[str],
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    runtime = get_runtime_config(db)
+    if not runtime.review_enabled:
+        raise HTTPException(403, "复习功能已关闭")
+    from backend.services import library_service
+    count = library_service.enroll_many(db, user_id=user.id, headwords=headwords)
+    return {"ok": True, "enrolled": count}
+
+
+@app.post("/api/review/submit")
+async def review_submit(
+    body: ReviewSubmitRequest,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    runtime = get_runtime_config(db)
+    if not runtime.review_enabled:
+        raise HTTPException(403, "复习功能已关闭")
+    from backend.services import library_service
+    outcomes = []
+    for fb in body.feedback:
+        outcome = library_service.submit_review_feedback(
+            db, user_id=user.id, headword=fb.headword, quality=fb.quality,
+        )
+        if outcome is None:
+            continue
+        outcomes.append({
+            "headword": fb.headword,
+            "box_before": outcome.box_before,
+            "box_after": outcome.box_after,
+            "due_at": outcome.due_at.isoformat(),
+        })
+    return {"ok": True, "outcomes": outcomes}
+
+
+@app.delete("/api/review/{headword}")
+async def review_delete(
+    headword: str,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    from backend.services import library_service
+    library_service.remove_from_review(db, user_id=user.id, headword=headword)
+    return {"ok": True}
+
+
+@app.get("/api/review/stats")
+async def review_stats_endpoint(
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    from backend.services import library_service
+    return library_service.review_stats(db, user_id=user.id)
+
+
 # ── Public share endpoints ────────────────────────────────────────────────────
 
 @app.get("/api/share/exam/{code}")
@@ -1732,6 +2011,39 @@ async def admin_ocr_test(
         raise HTTPException(500, f"文本提取失败: {exc}")
     finally:
         tmp_path.unlink(missing_ok=True)
+
+
+# ── Dictionary lookup cache (shared by all HTTP dict providers) ──────────────
+
+@app.get("/admin/dict-cache")
+async def admin_dict_cache_stats(admin: User = Depends(get_admin_user)):
+    from backend.services import dict_cache
+    return dict_cache.stats()
+
+
+@app.delete("/admin/dict-cache")
+async def admin_clear_dict_cache(
+    admin: User = Depends(get_admin_user),
+    source: Optional[str] = Query(None, description="Drop just one provider's entries"),
+):
+    from backend.services import dict_cache
+    deleted = dict_cache.clear(source)
+    label = source or "all"
+    return {"ok": True, "deleted": deleted, "message": f"已清除 {deleted} 条词典缓存（{label}）"}
+
+
+@app.post("/admin/dict-lookup-test")
+async def admin_dict_lookup_test(
+    body: dict,
+    admin: User = Depends(get_admin_user),
+):
+    """Run a multi-source live lookup for one word — for verifying provider config."""
+    from backend.services.dict_lookup import lookup_word as _lookup
+    word = (body.get("word") or "").strip()
+    if not word:
+        raise HTTPException(400, "请提供 word")
+    sources = body.get("sources") or None
+    return await _lookup(word, sources=sources)
 
 
 # ── Provider test endpoints ───────────────────────────────────────────────────

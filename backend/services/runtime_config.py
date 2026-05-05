@@ -112,6 +112,18 @@ class RuntimeConfig(BaseModel):
     ai_preprocess_enabled: bool = False
     # Automatic LLM fallback chain: if primary provider fails, try next LLM
     llm_fallback_enabled: bool = True
+    # Live online word lookup (iciba / free_dict / mw / youdao / ecdict aggregation)
+    live_lookup_enabled: bool = True
+    # Default sources for the /api/lookup endpoint when caller doesn't pin them
+    live_lookup_sources: list[str] = Field(
+        default_factory=lambda: ["iciba", "free_dict", "ecdict"],
+    )
+    # Persistent dict-cache TTL (days) for online lookups
+    dict_cache_ttl_days: int = Field(30, ge=0, le=365)
+    # Personal vocabulary library
+    library_enabled: bool = True
+    # Spaced-repetition review queue
+    review_enabled: bool = True
 
 
 def _default_config() -> RuntimeConfig:
@@ -201,11 +213,25 @@ def frontend_config_payload() -> Dict[str, Any]:
     except Exception:
         model_catalog = []
 
+    try:
+        from backend.services import dict_cache
+        dict_cache_stats = dict_cache.stats()
+    except Exception:
+        dict_cache_stats = {"total": 0, "by_source": {}}
+
+    try:
+        from backend.services.dict_lookup import available_lookup_sources
+        lookup_sources_available = available_lookup_sources()
+    except Exception:
+        lookup_sources_available = []
+
     return {
         "defaults": config.model_dump(),
         "ocr_capabilities": detect_ocr_capabilities(),
         "parse_backends": ["local", "mineru"],
         "ocr_cache_stats": cache_stats(),
+        "dict_cache_stats": dict_cache_stats,
+        "lookup_sources_available": lookup_sources_available,
         "text_cleaner_backends": ["none", "claude", "deepseek", "openai"],
         "gaokao_word_count": wordlist_count,
         "cefr_available": cefr_available_flag,

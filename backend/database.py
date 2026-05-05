@@ -86,6 +86,46 @@ class AppSetting(Base):
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
 
+class LibraryWord(Base):
+    """Personal vocabulary library: per-user starred / saved words."""
+    __tablename__ = "library_words"
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
+    headword = Column(String(64), nullable=False, index=True)
+    lemma = Column(String(64), nullable=False)
+    pos = Column(String(16), nullable=True)
+    chinese_meaning = Column(Text, nullable=True)
+    english_definition = Column(Text, nullable=True)
+    example_sentence = Column(Text, nullable=True)
+    notes = Column(Text, nullable=True)
+    tags = Column(String(255), nullable=True)            # comma-separated
+    source = Column(String(32), nullable=True)           # provider that generated the entry
+    source_exam_code = Column(String(12), nullable=True) # original exam if any
+    word_level = Column(String(16), nullable=True)
+    cefr_level = Column(String(8), nullable=True)
+    zipf_score = Column(String(8), nullable=True)        # stored as text to avoid float precision issues
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+class ReviewItem(Base):
+    """Spaced-repetition queue entry (Leitner-style boxes)."""
+    __tablename__ = "review_items"
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
+    headword = Column(String(64), nullable=False, index=True)
+    library_word_id = Column(Integer, ForeignKey("library_words.id"), nullable=True)
+    box = Column(Integer, nullable=False, default=0)              # 0..4 — Leitner box
+    correct_streak = Column(Integer, nullable=False, default=0)
+    review_count = Column(Integer, nullable=False, default=0)
+    last_reviewed_at = Column(DateTime, nullable=True)
+    due_at = Column(DateTime, nullable=False, default=datetime.utcnow, index=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
 def get_db():
     """FastAPI dependency: yield a DB session, close on exit."""
     db = SessionLocal()
@@ -127,7 +167,9 @@ def _ensure_schema_columns() -> None:
 # SQLite doesn't support parameter binding for identifiers/DDL, so we validate
 # against a hard-coded set before interpolation rather than accepting arbitrary
 # strings.
-_ALLOWED_TABLES: frozenset[str] = frozenset({"exams", "users", "dicts", "app_settings"})
+_ALLOWED_TABLES: frozenset[str] = frozenset({
+    "exams", "users", "dicts", "app_settings", "library_words", "review_items",
+})
 _ALLOWED_COLUMN_DEFINITIONS: frozenset[str] = frozenset({
     "TEXT", "TEXT NOT NULL", "TEXT NOT NULL DEFAULT 'local'",
     "INTEGER", "INTEGER NOT NULL DEFAULT 0", "INTEGER NOT NULL DEFAULT 1",
