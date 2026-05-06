@@ -4,9 +4,10 @@ from __future__ import annotations
 import io
 import logging
 import tempfile
+import time
 from pathlib import Path
 from statistics import mean
-from typing import Iterable, List, Tuple
+from typing import Any, Iterable, List, Tuple
 
 from PIL import Image, ImageFilter, ImageOps
 
@@ -15,7 +16,9 @@ from backend.services.runtime_config import get_runtime_config
 
 logger = logging.getLogger(__name__)
 
-_RAPIDOCR_ENGINE = None
+_RAPIDOCR_ENGINE: Any = None
+_RAPIDOCR_FAILED_AT: float = 0.0
+_RAPIDOCR_RETRY_COOLDOWN_S: float = 60.0   # retry initialisation after this many seconds
 
 
 def _get_ocr_config():
@@ -34,6 +37,7 @@ def _get_ocr_config():
             sharpen = True
             auto_rotate = False
             fallback_to_tesseract = True
+            pdf_ocr_threshold = 50
 
         return _Fallback()
 
@@ -51,18 +55,32 @@ def _get_tesseract():
 
 
 def _get_rapidocr():
-    global _RAPIDOCR_ENGINE
-    if _RAPIDOCR_ENGINE is not None:
+    """Lazy-init the RapidOCR engine.
+
+    Failures are remembered for ``_RAPIDOCR_RETRY_COOLDOWN_S`` so we don't slam
+    a misconfigured environment with repeated import attempts on every page,
+    but we DO retry eventually so a transient failure (e.g. model download
+    interrupted) recovers without restarting the process.
+    """
+    global _RAPIDOCR_ENGINE, _RAPIDOCR_FAILED_AT
+    if _RAPIDOCR_ENGINE not in (None, False):
         return _RAPIDOCR_ENGINE
+
+    if _RAPIDOCR_ENGINE is False:
+        if (time.monotonic() - _RAPIDOCR_FAILED_AT) < _RAPIDOCR_RETRY_COOLDOWN_S:
+            return False
+        # Cooldown expired — try once more.
 
     try:
         from rapidocr import RapidOCR
 
         _RAPIDOCR_ENGINE = RapidOCR()
+        _RAPIDOCR_FAILED_AT = 0.0
         return _RAPIDOCR_ENGINE
     except Exception as exc:
-        logger.debug("RapidOCR unavailable: %s", exc)
+        logger.info("RapidOCR unavailable, will retry in %ds: %s", int(_RAPIDOCR_RETRY_COOLDOWN_S), exc)
         _RAPIDOCR_ENGINE = False
+        _RAPIDOCR_FAILED_AT = time.monotonic()
         return _RAPIDOCR_ENGINE
 
 
@@ -156,8 +174,6 @@ def _ocr_tesseract_image(img: Image.Image) -> str:
 def _extract_rapidocr_text(result, _depth: int = 0) -> str:
     if result is None:
         return ""
-    if not result and not isinstance(result, (list, tuple)):
-        return ""
 
     # Named attribute API (newer RapidOCR versions)
     if hasattr(result, "txts"):
@@ -237,15 +253,27 @@ def _ocr_image_core(path: Path, img: Image.Image) -> str:
     cfg = _get_ocr_config()
     engine = (cfg.engine or "auto").lower()
 
+    rapidocr_error: Exception | None = None
     if engine in {"auto", "rapidocr"}:
         try:
             return _ocr_with_rapidocr(path)
         except Exception as exc:
+            rapidocr_error = exc
             logger.info("RapidOCR unavailable or failed for %s: %s", path.name, exc)
             if engine == "rapidocr" and not cfg.fallback_to_tesseract:
                 raise
 
-    return _ocr_tesseract_image(img)
+    try:
+        return _ocr_tesseract_image(img)
+    except Exception as tesseract_error:
+        # Surface a combined diagnostic so admins can see WHY both engines
+        # failed instead of just the last error in the chain.
+        if rapidocr_error is not None:
+            raise RuntimeError(
+                f"All OCR engines failed for {path.name}. "
+                f"RapidOCR: {rapidocr_error}. Tesseract: {tesseract_error}"
+            ) from tesseract_error
+        raise
 
 
 def ocr_image(path: Path) -> str:

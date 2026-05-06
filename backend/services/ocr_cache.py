@@ -37,14 +37,42 @@ def _file_hash(file_path: Path) -> str:
     return h.hexdigest()
 
 
-def _settings_hash(ocr_engine: str, language: str, backend: str) -> str:
-    key = f"{ocr_engine}:{language}:{backend}"
-    return hashlib.md5(key.encode()).hexdigest()[:8]
+def _settings_hash(ocr_engine: str, language: str, backend: str, extras: Optional[dict] = None) -> str:
+    """Hash all OCR settings that affect output, so config changes invalidate cache."""
+    parts = [f"{ocr_engine}:{language}:{backend}"]
+    if extras:
+        for k in sorted(extras.keys()):
+            parts.append(f"{k}={extras[k]}")
+    key = "|".join(parts)
+    return hashlib.md5(key.encode()).hexdigest()[:12]
+
+
+def _runtime_ocr_extras() -> dict:
+    """Pull OCR settings from runtime config that influence the extracted text.
+
+    Anything that changes the bytes coming out of the OCR pipeline must be in
+    the cache key — otherwise stale results are served after the user tweaks
+    settings in the admin panel.
+    """
+    try:
+        from backend.services.runtime_config import get_runtime_config
+        ocr = get_runtime_config().ocr
+        return {
+            "psm": ocr.page_segmentation_mode,
+            "preprocess": int(bool(ocr.preprocess)),
+            "binary_threshold": ocr.binary_threshold,
+            "upscale_factor": round(ocr.upscale_factor, 2),
+            "sharpen": int(bool(ocr.sharpen)),
+            "pdf_dpi": ocr.pdf_dpi,
+            "pdf_ocr_threshold": ocr.pdf_ocr_threshold,
+        }
+    except Exception:
+        return {}
 
 
 def cache_key(file_path: Path, ocr_engine: str = "auto", language: str = "eng", backend: str = "local") -> str:
     fh = _file_hash(file_path)
-    sh = _settings_hash(ocr_engine, language, backend)
+    sh = _settings_hash(ocr_engine, language, backend, extras=_runtime_ocr_extras())
     return f"{fh[:16]}_{sh}"
 
 

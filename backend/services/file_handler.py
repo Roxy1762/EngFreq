@@ -73,22 +73,52 @@ def _extract_pdf_pdfplumber(path: Path) -> Tuple[str, int]:
 
 def _extract_pdf(path: Path) -> Tuple[str, bool]:
     """
-    Extract text from a PDF. Tries PyMuPDF first (10x+ faster), falls back to
-    pdfplumber, finally OCR if the PDF appears scanned.
+    Extract text from a PDF.
+
+    Pipeline:
+      1. PyMuPDF (fastest, handles most modern PDFs)
+      2. pdfplumber (slower but reads some malformed PDFs PyMuPDF skips,
+         AND tried whenever PyMuPDF returns empty text — some PDFs encode
+         their content in a way fitz can't decode but pdfplumber can)
+      3. OCR (only if both text-layer extractors return less than the
+         configured threshold of characters)
 
     Returns (text, used_ocr).
     """
-    result = _extract_pdf_pymupdf(path)
-    if result is None:
-        result = _extract_pdf_pdfplumber(path)
-    full_text, total_chars = result
-
     # Use configurable threshold to decide if PDF is scanned
     try:
         from backend.services.runtime_config import get_runtime_config
         threshold = get_runtime_config().ocr.pdf_ocr_threshold
-    except Exception:
+    except Exception as exc:
+        logger.debug("Runtime config unavailable, using default OCR threshold: %s", exc)
         threshold = 50
+
+    full_text = ""
+    total_chars = 0
+
+    pymupdf_result = _extract_pdf_pymupdf(path)
+    if pymupdf_result is not None:
+        full_text, total_chars = pymupdf_result
+
+    # If PyMuPDF was unavailable OR returned suspiciously little text, retry
+    # with pdfplumber before falling back to expensive OCR.
+    if pymupdf_result is None or total_chars < threshold:
+        try:
+            plumber_text, plumber_chars = _extract_pdf_pdfplumber(path)
+        except RuntimeError:
+            # Both extractors unavailable — propagate the original error so
+            # the user sees a clear "install PyMuPDF or pdfplumber" message.
+            if pymupdf_result is None:
+                raise
+            plumber_text, plumber_chars = "", 0
+        except Exception as exc:   # noqa: BLE001
+            logger.warning("pdfplumber extraction failed for %s: %s", path.name, exc)
+            plumber_text, plumber_chars = "", 0
+
+        # Use whichever extractor pulled more text — sometimes pdfplumber
+        # finds content where PyMuPDF returns garbage (or vice versa).
+        if plumber_chars > total_chars:
+            full_text, total_chars = plumber_text, plumber_chars
 
     if total_chars < threshold:
         logger.info(
@@ -182,17 +212,17 @@ def extract_text(path: Path, use_cache: bool = True) -> ExtractedText:
     if runtime.parse_backend == "mineru" and runtime.mineru.enabled:
         if use_cache:
             try:
-                from backend.services.ocr_cache import get_cached, save_cache
+                from backend.services.ocr_cache import get_cached
                 cached = get_cached(path, ocr_engine="mineru", language=runtime.ocr.language, backend="mineru")
-                if cached:
+                if cached and cached.get("text"):
                     return ExtractedText(
                         text=cached["text"],
                         used_ocr=cached.get("used_ocr", True),
                         backend="mineru",
                         raw_result=cached.get("raw_result"),
                     )
-            except Exception:
-                pass
+            except Exception as exc:   # noqa: BLE001
+                logger.debug("MinerU cache lookup failed for %s: %s", path.name, exc)
 
         try:
             from backend.services.mineru_service import parse_file
@@ -204,7 +234,7 @@ def extract_text(path: Path, use_cache: bool = True) -> ExtractedText:
                 backend=parsed.get("backend", "mineru"),
                 raw_result=parsed.get("raw_result"),
             )
-            if use_cache:
+            if use_cache and result.text:
                 try:
                     from backend.services.ocr_cache import save_cache
                     save_cache(
@@ -214,8 +244,8 @@ def extract_text(path: Path, use_cache: bool = True) -> ExtractedText:
                         language=runtime.ocr.language,
                         backend="mineru",
                     )
-                except Exception:
-                    pass
+                except Exception as exc:   # noqa: BLE001
+                    logger.debug("MinerU cache write failed for %s: %s", path.name, exc)
             return result
         except Exception as exc:
             if runtime.mineru.fallback_to_local:
@@ -229,26 +259,29 @@ def extract_text(path: Path, use_cache: bool = True) -> ExtractedText:
 
     if use_cache and is_ocr_needed and runtime.ocr_cache_enabled:
         try:
-            from backend.services.ocr_cache import get_cached, save_cache
+            from backend.services.ocr_cache import get_cached
             cached = get_cached(
                 path,
                 ocr_engine=runtime.ocr.engine,
                 language=runtime.ocr.language,
                 backend="local",
             )
-            if cached:
+            # Only honour the cache hit when there is real text — otherwise a
+            # previously-failed OCR run could permanently shadow a working
+            # retry after the user tweaks settings.
+            if cached and cached.get("text"):
                 return ExtractedText(
                     text=cached["text"],
                     used_ocr=cached.get("used_ocr", True),
                     backend="local",
                     raw_result=cached.get("raw_result"),
                 )
-        except Exception:
-            pass
+        except Exception as exc:   # noqa: BLE001
+            logger.debug("OCR cache lookup failed for %s: %s", path.name, exc)
 
     result = _extract_text_local(path)
 
-    if use_cache and result.used_ocr and runtime.ocr_cache_enabled:
+    if use_cache and result.used_ocr and result.text and runtime.ocr_cache_enabled:
         try:
             from backend.services.ocr_cache import save_cache
             save_cache(
@@ -258,7 +291,7 @@ def extract_text(path: Path, use_cache: bool = True) -> ExtractedText:
                 language=runtime.ocr.language,
                 backend="local",
             )
-        except Exception:
-            pass
+        except Exception as exc:   # noqa: BLE001
+            logger.debug("OCR cache write failed for %s: %s", path.name, exc)
 
     return result
