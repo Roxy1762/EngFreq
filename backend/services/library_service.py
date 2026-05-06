@@ -18,7 +18,7 @@ from __future__ import annotations
 import json
 import logging
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 from sqlalchemy.orm import Session
@@ -28,6 +28,16 @@ from backend.database import LibraryWord, ReviewItem
 from backend.models.schemas import LibraryAddRequest
 
 logger = logging.getLogger(__name__)
+
+
+def _utcnow() -> datetime:
+    """Naive UTC now — non-deprecated replacement for ``datetime.utcnow()``.
+
+    Returned naive (no tzinfo) so it round-trips cleanly through SQLite's tz-less
+    DateTime columns and stays comparable with timestamps written before this
+    helper existed.
+    """
+    return datetime.now(timezone.utc).replace(tzinfo=None)
 
 
 # ── Spacing schedule ──────────────────────────────────────────────────────────
@@ -163,8 +173,11 @@ def bulk_add_from_dict(
     except Exception:
         items = []
 
-    headword_filter = None
-    if headwords:
+    # `headword_filter is None` → import all selected; `set()` (possibly empty) → restrict to that set.
+    # Distinguishing "no filter requested" from "filter requested but empty after sanitising" was
+    # broken before — an all-whitespace filter list silently fell through to the unfiltered import.
+    headword_filter: Optional[set[str]] = None
+    if headwords is not None:
         headword_filter = {h.strip().lower() for h in headwords if h and h.strip()}
 
     created = 0
@@ -175,10 +188,10 @@ def bulk_add_from_dict(
         if not hw:
             skipped += 1
             continue
-        if headword_filter and hw.lower() not in headword_filter:
+        if headword_filter is not None and hw.lower() not in headword_filter:
             skipped += 1
             continue
-        if not headword_filter and not item.get("selected", True):
+        if headword_filter is None and not item.get("selected", True):
             # When importing without an explicit list, only auto-add selected words.
             skipped += 1
             continue
@@ -231,7 +244,7 @@ def enroll_in_review(db: Session, *, user_id: int, headword: str) -> ReviewItem:
         headword=headword,
         library_word_id=library_id,
         box=0,
-        due_at=datetime.utcnow(),
+        due_at=_utcnow(),
     )
     db.add(item)
     db.commit()
@@ -263,7 +276,7 @@ def get_review_queue(
     db: Session, *, user_id: int, limit: int = 50, include_future: bool = False,
 ) -> List[Dict[str, Any]]:
     """Return review items due now (or in the future when include_future=True)."""
-    now = datetime.utcnow()
+    now = _utcnow()
     q = db.query(ReviewItem, LibraryWord).outerjoin(
         LibraryWord, ReviewItem.library_word_id == LibraryWord.id,
     ).filter(ReviewItem.user_id == user_id)
@@ -311,7 +324,7 @@ def submit_review_feedback(
         item.correct_streak = 0
 
     interval = _BOX_INTERVAL_DAYS.get(box_after, 1)
-    now = datetime.utcnow()
+    now = _utcnow()
     item.box = box_after
     item.review_count = (item.review_count or 0) + 1
     item.last_reviewed_at = now
@@ -321,9 +334,66 @@ def submit_review_feedback(
     return SchedulerOutcome(box_before=box_before, box_after=box_after, due_at=item.due_at)
 
 
+def library_stats(db: Session, *, user_id: int) -> Dict[str, Any]:
+    """Aggregate counts for a user's personal library — used by the dashboard.
+
+    Returns counts broken down by word_level, cefr_level, and source provider,
+    plus a count of how many entries are enrolled in the review queue.
+    """
+    rows = db.query(LibraryWord).filter_by(user_id=user_id).all()
+    by_level: Dict[str, int] = {}
+    by_cefr: Dict[str, int] = {}
+    by_source: Dict[str, int] = {}
+    tag_counts: Dict[str, int] = {}
+    week_cutoff = _utcnow() - timedelta(days=7)
+    last_week = 0
+    for row in rows:
+        lvl = row.word_level or "未分级"
+        by_level[lvl] = by_level.get(lvl, 0) + 1
+        if row.cefr_level:
+            by_cefr[row.cefr_level] = by_cefr.get(row.cefr_level, 0) + 1
+        if row.source:
+            by_source[row.source] = by_source.get(row.source, 0) + 1
+        for tag in (row.tags or "").split(","):
+            tag = tag.strip()
+            if tag:
+                tag_counts[tag] = tag_counts.get(tag, 0) + 1
+        if row.created_at and row.created_at >= week_cutoff:
+            last_week += 1
+
+    review_enrolled = db.query(ReviewItem).filter_by(user_id=user_id).count()
+    return {
+        "total": len(rows),
+        "added_last_7_days": last_week,
+        "review_enrolled": review_enrolled,
+        "by_word_level": by_level,
+        "by_cefr_level": by_cefr,
+        "by_source": by_source,
+        "top_tags": sorted(
+            ({"tag": t, "count": c} for t, c in tag_counts.items()),
+            key=lambda r: (-r["count"], r["tag"]),
+        )[:50],
+    }
+
+
+def list_tags(db: Session, *, user_id: int) -> List[Dict[str, Any]]:
+    """Return every tag the user has applied with its frequency. Useful for autocomplete."""
+    rows = db.query(LibraryWord.tags).filter_by(user_id=user_id).all()
+    counts: Dict[str, int] = {}
+    for (raw,) in rows:
+        for tag in (raw or "").split(","):
+            tag = tag.strip()
+            if tag:
+                counts[tag] = counts.get(tag, 0) + 1
+    return sorted(
+        ({"tag": t, "count": c} for t, c in counts.items()),
+        key=lambda r: (-r["count"], r["tag"]),
+    )
+
+
 def review_stats(db: Session, *, user_id: int) -> Dict[str, Any]:
     total = db.query(ReviewItem).filter_by(user_id=user_id).count()
-    now = datetime.utcnow()
+    now = _utcnow()
     due = db.query(ReviewItem).filter(
         ReviewItem.user_id == user_id, ReviewItem.due_at <= now
     ).count()

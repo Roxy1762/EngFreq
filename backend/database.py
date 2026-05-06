@@ -125,8 +125,8 @@ class LibraryWord(Base):
     word_level = Column(String(16), nullable=True)
     cefr_level = Column(String(8), nullable=True)
     zipf_score = Column(String(8), nullable=True)        # stored as text to avoid float precision issues
-    created_at = Column(DateTime, default=datetime.utcnow)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+    updated_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
 
 
 class ReviewItem(Base):
@@ -141,9 +141,9 @@ class ReviewItem(Base):
     correct_streak = Column(Integer, nullable=False, default=0)
     review_count = Column(Integer, nullable=False, default=0)
     last_reviewed_at = Column(DateTime, nullable=True)
-    due_at = Column(DateTime, nullable=False, default=datetime.utcnow, index=True)
-    created_at = Column(DateTime, default=datetime.utcnow)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    due_at = Column(DateTime, nullable=False, default=lambda: datetime.now(timezone.utc), index=True)
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+    updated_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
 
 
 def get_db():

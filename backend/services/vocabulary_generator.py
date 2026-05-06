@@ -131,7 +131,12 @@ async def ai_preprocess_lemmas(
         logger.warning("AI preprocess failed (%s): %s — using priority sort", pname, exc)
         return sorted_lemmas[:top_n]
 
-    data = parse_json_object(response.text)
+    try:
+        data = parse_json_object(response.text)
+    except Exception as exc:   # noqa: BLE001
+        # Models occasionally return prose instead of JSON; don't crash the pipeline.
+        logger.warning("AI preprocess returned unparseable JSON (%s) — using priority sort", exc)
+        return sorted_lemmas[:top_n]
     ai_words = data.get("words", []) if isinstance(data, dict) else []
     corrections = data.get("corrections", {}) if isinstance(data, dict) else {}
 
