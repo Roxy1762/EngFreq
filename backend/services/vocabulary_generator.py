@@ -27,6 +27,39 @@ logger = logging.getLogger(__name__)
 
 # ── Provider registry ─────────────────────────────────────────────────────────
 
+class _OfflineStubProvider(BaseVocabProvider):
+    """Last-resort provider that emits stub entries from the input lemmas alone.
+
+    Guarantees the vocab pipeline can always produce SOME output even when
+    every external provider is unreachable — useful for offline-only
+    deployments and as a safety net in the fallback chain.
+    """
+
+    name = "offline_stub"
+
+    async def enrich(
+        self,
+        entries: List[LemmaEntry],
+        context_text: str = "",
+    ) -> List[VocabEntry]:
+        return [
+            VocabEntry(
+                headword=e.lemma,
+                lemma=e.lemma,
+                family=e.family_id,
+                pos=e.pos or None,
+                body_count=e.body_count,
+                stem_count=e.stem_count,
+                option_count=e.option_count,
+                total_count=e.total_count,
+                score=e.score,
+                source="offline_stub",
+                notes="离线模式：未连接到词典/AI 服务，仅生成基础词频条目",
+            )
+            for e in entries
+        ]
+
+
 def _build_registry() -> dict[str, type[BaseVocabProvider]]:
     registry: dict[str, type] = {}
 
@@ -38,6 +71,18 @@ def _build_registry() -> dict[str, type[BaseVocabProvider]]:
     _try_register(registry, "youdao",          "backend.providers.youdao_provider",             "YoudaoProvider")
     _try_register(registry, "ecdict",          "backend.providers.ecdict_provider",             "ECDICTProvider")
     _try_register(registry, "iciba",           "backend.providers.iciba_provider",              "ICIBAProvider")
+
+    # Always-available offline fallback. Stays at the end of the fallback chain
+    # so the user only sees stub entries when truly nothing else works.
+    registry["offline_stub"] = _OfflineStubProvider
+
+    if len(registry) <= 1:
+        logger.warning(
+            "No external vocabulary providers loaded — only the offline stub is "
+            "registered. Install dependencies or set provider API keys."
+        )
+    else:
+        logger.info("Vocabulary providers registered: %s", sorted(registry.keys()))
 
     return registry
 
@@ -184,8 +229,19 @@ async def ai_preprocess_lemmas(
 # ── Fallback chain helpers ────────────────────────────────────────────────────
 
 def _build_fallback_chain(primary: str) -> list[str]:
-    """Given a primary provider, construct a sensible fallback chain."""
-    chain: list[str] = [primary]
+    """Given a primary provider, construct a sensible fallback chain.
+
+    Order:
+      1. The user's chosen provider (if registered).
+      2. Other LLM providers that have API keys configured.
+      3. ``free_dict`` (no auth, public API) for dictionary lookups.
+      4. ``offline_stub`` as the absolute last resort so the pipeline is
+         guaranteed to return SOMETHING — never crashing the whole flow when
+         the network is unavailable.
+    """
+    chain: list[str] = []
+    if primary:
+        chain.append(primary)
 
     runtime = get_runtime_config()
     llm = runtime.llm
@@ -200,11 +256,14 @@ def _build_fallback_chain(primary: str) -> list[str]:
         configured.append("openai")
 
     for name in _LLM_FALLBACK_ORDER:
-        if name != primary and name in configured and name in _REGISTRY:
+        if name != primary and name in configured and name in _REGISTRY and name not in chain:
             chain.append(name)
 
     if "free_dict" in _REGISTRY and "free_dict" not in chain:
-        chain.append("free_dict")      # always-available last resort
+        chain.append("free_dict")      # public, no key required
+
+    if "offline_stub" in _REGISTRY and "offline_stub" not in chain:
+        chain.append("offline_stub")   # absolute last resort
 
     return chain
 
@@ -214,15 +273,29 @@ async def _enrich_with_chain(
     lemmas: List[LemmaEntry],
     context_text: str,
 ) -> tuple[List[VocabEntry], str]:
-    """Walk the fallback chain until one provider succeeds."""
+    """Walk the fallback chain until one provider succeeds.
+
+    Tracks the FIRST failure (which is usually the most informative — it's the
+    user's chosen provider) and the LAST failure as the proximate cause, so the
+    final error message points at both ends of the chain.
+    """
+    first_exc: Optional[Exception] = None
     last_exc: Optional[Exception] = None
+    tried: list[str] = []
+    skipped: list[str] = []
+
     for name in provider_chain:
         if name not in _REGISTRY:
+            skipped.append(name)
             continue
+
         try:
             provider: BaseVocabProvider = _REGISTRY[name]()
         except Exception as exc:   # noqa: BLE001
             logger.info("Provider '%s' unavailable (%s), trying next", name, exc)
+            tried.append(name)
+            if first_exc is None:
+                first_exc = exc
             last_exc = exc
             continue
 
@@ -230,6 +303,7 @@ async def _enrich_with_chain(
             "Generating vocabulary for %d words via '%s'",
             len(lemmas), name,
         )
+        tried.append(name)
         try:
             vocab = await provider.enrich(lemmas, context_text=context_text)
             if vocab:
@@ -237,11 +311,32 @@ async def _enrich_with_chain(
             logger.warning("Provider '%s' returned empty vocab list, trying next", name)
         except Exception as exc:   # noqa: BLE001
             logger.warning("Provider '%s' raised %s, trying fallback", name, exc)
+            if first_exc is None:
+                first_exc = exc
             last_exc = exc
 
-    if last_exc:
-        raise RuntimeError(f"All providers in chain {provider_chain} failed") from last_exc
-    raise RuntimeError(f"No working provider in chain: {provider_chain}")
+    # Build a friendlier diagnostic — operators need to know whether the chain
+    # was empty (no providers installed) vs. all configured providers failed.
+    detail_parts = []
+    if tried:
+        detail_parts.append(f"tried {tried}")
+    if skipped:
+        detail_parts.append(f"skipped {skipped} (not installed)")
+
+    if first_exc is not None:
+        first_msg = str(first_exc) or first_exc.__class__.__name__
+        if last_exc is not None and last_exc is not first_exc:
+            last_msg = str(last_exc) or last_exc.__class__.__name__
+            detail_parts.append(f"first error: {first_msg}; last error: {last_msg}")
+        else:
+            detail_parts.append(f"error: {first_msg}")
+        raise RuntimeError(
+            f"Vocabulary generation failed — {'; '.join(detail_parts)}"
+        ) from first_exc
+
+    raise RuntimeError(
+        f"No working vocabulary provider — {'; '.join(detail_parts) or f'chain={provider_chain}'}"
+    )
 
 
 async def generate_vocabulary(
@@ -274,11 +369,21 @@ async def generate_vocabulary(
         candidates = sorted(lemma_table, key=_learning_priority, reverse=True)[:top_n]
 
     if pname not in _REGISTRY:
-        logger.warning(
-            "Provider '%s' not in registry (%s). Falling back to free_dict.",
-            pname, list(_REGISTRY.keys()),
-        )
-        pname = "free_dict"
+        # Pick the best available alternative instead of blindly substituting
+        # ``free_dict`` (which itself may be unregistered if httpx is missing).
+        for alt in ("claude", "deepseek", "openai", "free_dict", "offline_stub"):
+            if alt in _REGISTRY:
+                logger.warning(
+                    "Provider '%s' not in registry %s. Falling back to '%s'.",
+                    pname, list(_REGISTRY.keys()), alt,
+                )
+                pname = alt
+                break
+        else:
+            raise RuntimeError(
+                f"Provider '{pname}' is unknown and no fallback provider is "
+                f"registered. Installed providers: {list(_REGISTRY.keys())}"
+            )
 
     chain = _build_fallback_chain(pname)
     logger.info("Vocabulary provider chain: %s", chain)

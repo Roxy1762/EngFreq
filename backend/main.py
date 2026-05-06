@@ -51,6 +51,7 @@ from backend.auth import (
     decode_token,
     generate_code,
     hash_password,
+    password_strength_error,
     verify_password,
 )
 from backend.config import settings
@@ -460,9 +461,28 @@ async def _run_analysis(
 
         loop = asyncio.get_running_loop()
         runtime = get_runtime_config()
-        extracted = await loop.run_in_executor(None, extract_text, file_path)
+        try:
+            extracted = await loop.run_in_executor(None, extract_text, file_path)
+        except Exception as exc:
+            # Surface a friendlier message for the most common case: tesseract
+            # missing or RapidOCR engine init failure.
+            logger.exception("Text extraction failed for task %s", task_id)
+            _update_task(
+                task_id, status="error", progress=0,
+                message="文本提取失败（OCR 错误或文件格式不支持）",
+                error=f"extract_text failed: {exc}",
+            )
+            return
         text = extracted.text
         used_ocr = extracted.used_ocr
+
+        if not text or not text.strip():
+            _update_task(
+                task_id, status="error", progress=0,
+                message="未能从文件中提取到任何文本。请检查文件是否为空、损坏或扫描质量过低。",
+                error="empty_extraction",
+            )
+            return
 
         # Optional LLM text cleaning for OCR output
         if used_ocr and runtime.text_cleaner.enabled and runtime.text_cleaner.backend != "none":
@@ -491,10 +511,17 @@ async def _run_analysis(
         )
         _update_task(task_id, progress=80, message="Building result…")
 
+        # Generate vocab AFTER analysis is fully built — so a vocab failure
+        # never costs the user the analysis result they already paid for.
         vocab_table = []
+        vocab_error: str | None = None
         if req.generate_vocab:
-            _update_task(task_id, progress=85, message="Generating vocabulary…")
-            vocab_table = await generate_vocabulary(lemma_table, context_text=text, top_n=req.top_n)
+            _update_task(task_id, progress=85, message="Generating vocabulary…", vocab_status="processing")
+            try:
+                vocab_table = await generate_vocabulary(lemma_table, context_text=text, top_n=req.top_n)
+            except Exception as exc:   # noqa: BLE001
+                logger.exception("Vocab generation failed for task %s", task_id)
+                vocab_error = str(exc)
 
         should_store_raw = bool(runtime.save_raw_parse_result and extracted.raw_result is not None)
         result = AnalysisResult(
@@ -503,7 +530,28 @@ async def _run_analysis(
             word_table=word_table, lemma_table=lemma_table,
             family_table=family_table, vocab_table=vocab_table,
         )
-        _update_task(task_id, status="done", progress=100, message="Analysis complete.", result=result)
+
+        # Record the analysis result regardless of vocab outcome — the user
+        # gets a usable frequency table even when the LLM provider is down.
+        if req.generate_vocab:
+            if vocab_error is not None:
+                done_message = "Analysis complete (vocab generation failed)."
+                vocab_status = "error"
+            elif not vocab_table:
+                done_message = "Analysis complete (vocab list is empty)."
+                vocab_status = "done"
+            else:
+                done_message = "Analysis complete."
+                vocab_status = "done"
+        else:
+            done_message = "Analysis complete."
+            vocab_status = None
+
+        _update_task(
+            task_id, status="done", progress=100, message=done_message,
+            result=result, vocab_status=vocab_status,
+            error=(f"vocab generation failed: {vocab_error}" if vocab_error else None),
+        )
 
         # Persist to DB
         db = SessionLocal()
@@ -568,19 +616,40 @@ class ResetPasswordRequest(BaseModel):
 
 # ── Auth endpoints ────────────────────────────────────────────────────────────
 
+def _validate_username(username: str) -> None:
+    """Reject usernames that would bypass the case-insensitive uniqueness or
+    contain unicode characters that look identical to ASCII (homograph attack)."""
+    if not isinstance(username, str):
+        raise HTTPException(400, "用户名格式无效")
+    cleaned = username.strip()
+    if cleaned != username:
+        raise HTTPException(400, "用户名不能以空白字符开头或结尾")
+    if len(cleaned) < 2 or len(cleaned) > 32:
+        raise HTTPException(400, "用户名长度须在 2–32 字符之间")
+    if not cleaned.replace("_", "").replace("-", "").isalnum():
+        raise HTTPException(400, "用户名只能包含字母、数字、下划线和连字符")
+    if not cleaned.isascii():
+        raise HTTPException(400, "用户名只能包含 ASCII 字母、数字和下划线/连字符")
+
+
+def _validate_password_or_400(password: str) -> None:
+    err = password_strength_error(password)
+    if err:
+        raise HTTPException(400, err)
+
+
 @app.post("/auth/register")
 async def register(body: RegisterRequest, request: Request, db: Session = Depends(get_db)):
     _enforce_rate_limit(request, "register")
     runtime = get_runtime_config(db)
     if not runtime.registration_enabled:
         raise HTTPException(403, "注册功能已关闭，请联系管理员")
-    if len(body.username) < 2 or len(body.username) > 32:
-        raise HTTPException(400, "用户名长度须在 2–32 字符之间")
-    if len(body.password) < 6:
-        raise HTTPException(400, "密码至少需要 6 个字符")
-    if not body.username.replace("_", "").replace("-", "").isalnum():
-        raise HTTPException(400, "用户名只能包含字母、数字、下划线和连字符")
-    if db.query(User).filter_by(username=body.username).first():
+    _validate_username(body.username)
+    _validate_password_or_400(body.password)
+    # Case-insensitive uniqueness — "Alice" and "alice" should not both register.
+    from sqlalchemy import func
+    existing = db.query(User).filter(func.lower(User.username) == body.username.lower()).first()
+    if existing:
         raise HTTPException(400, "该用户名已被注册")
     user = User(username=body.username, password_hash=hash_password(body.password))
     db.add(user)
@@ -598,7 +667,10 @@ async def register(body: RegisterRequest, request: Request, db: Session = Depend
 @app.post("/auth/login")
 async def login(body: LoginRequest, request: Request, db: Session = Depends(get_db)):
     _enforce_rate_limit(request, "login")
-    user = db.query(User).filter_by(username=body.username).first()
+    # Case-insensitive lookup so the user can log in regardless of how they
+    # capitalised their username.
+    from sqlalchemy import func
+    user = db.query(User).filter(func.lower(User.username) == (body.username or "").lower()).first()
     if not user or not verify_password(body.password, user.password_hash):
         raise HTTPException(401, "用户名或密码错误")
     token = create_token(user.id, user.username, user.is_admin)
@@ -654,6 +726,9 @@ async def change_password(
         raise HTTPException(401, "用户不存在")
     if not verify_password(body.old_password, db_user.password_hash):
         raise HTTPException(400, "原密码不正确")
+    _validate_password_or_400(body.new_password)
+    if body.new_password == body.old_password:
+        raise HTTPException(400, "新密码不能与原密码相同")
     db_user.password_hash = hash_password(body.new_password)
     db.commit()
     return {"ok": True, "message": "密码修改成功"}
@@ -1828,8 +1903,7 @@ async def admin_reset_password(
     admin: User = Depends(get_admin_user),
     db: Session = Depends(get_db),
 ):
-    if len(body.new_password) < 6:
-        raise HTTPException(400, "密码至少需要 6 个字符")
+    _validate_password_or_400(body.new_password)
     user = db.query(User).filter_by(id=user_id).first()
     if not user:
         raise HTTPException(404, "用户不存在")
@@ -1934,11 +2008,11 @@ async def admin_create_user(
     admin: User = Depends(get_admin_user),
     db: Session = Depends(get_db),
 ):
-    if len(body.username) < 2 or len(body.username) > 32:
-        raise HTTPException(400, "用户名长度须在 2–32 字符之间")
-    if len(body.password) < 6:
-        raise HTTPException(400, "密码至少需要 6 个字符")
-    if db.query(User).filter_by(username=body.username).first():
+    _validate_username(body.username)
+    _validate_password_or_400(body.password)
+    from sqlalchemy import func
+    existing = db.query(User).filter(func.lower(User.username) == body.username.lower()).first()
+    if existing:
         raise HTTPException(400, "该用户名已被注册")
     user = User(username=body.username, password_hash=hash_password(body.password), is_admin=body.is_admin)
     db.add(user)
@@ -1960,16 +2034,21 @@ async def admin_delete_user(
         raise HTTPException(404, "用户不存在")
     if user.is_admin:
         raise HTTPException(400, "不能删除其他管理员账号")
-    # Delete associated records
-    for exam in user.exams:
-        for d in exam.dicts:
-            db.delete(d)
-        db.delete(exam)
-    for d in user.dicts:
-        db.delete(d)
+    username = user.username
+
+    # Cascade is configured on the User → exams / dicts / library / review
+    # relationships, so a single ``db.delete(user)`` is enough.  The previous
+    # implementation iterated user.exams AND user.dicts manually — but exam.dicts
+    # overlapped with user.dicts, raising InvalidRequestError when SQLAlchemy
+    # tried to delete the same Dict row twice.
+    #
+    # Sweep up library/review rows that don't have an ORM-level cascade.
+    from backend.database import LibraryWord, ReviewItem
+    db.query(ReviewItem).filter_by(user_id=user_id).delete(synchronize_session=False)
+    db.query(LibraryWord).filter_by(user_id=user_id).delete(synchronize_session=False)
     db.delete(user)
     db.commit()
-    return {"ok": True, "message": f"用户 {user.username} 已删除"}
+    return {"ok": True, "message": f"用户 {username} 已删除"}
 
 
 @app.get("/admin/system")
