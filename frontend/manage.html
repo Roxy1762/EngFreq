@@ -418,6 +418,52 @@ body { font-family: "Segoe UI", "PingFang SC", "Microsoft YaHei", system-ui, san
           </div>
           <button class="btn btn-primary btn-sm" onclick="saveOpenAIConfig()" style="margin-top:.75rem">保存</button>
         </div>
+
+        <div class="card">
+          <div class="card-title"><span class="left">Merriam-Webster 词典</span></div>
+          <div class="alert alert-info" style="margin-bottom:1rem">
+            🔑 申请地址：<a href="https://dictionaryapi.com/" target="_blank" rel="noopener">https://dictionaryapi.com/</a>
+          </div>
+          <div class="form-row">
+            <div class="form-group">
+              <label>API Key</label>
+              <input type="password" id="cfg-mw-key" placeholder="未配置，输入后保存" />
+            </div>
+          </div>
+          <button class="btn btn-primary btn-sm" onclick="saveDictProvidersConfig('mw')" style="margin-top:.75rem">保存</button>
+        </div>
+
+        <div class="card">
+          <div class="card-title"><span class="left">有道词典</span></div>
+          <div class="alert alert-info" style="margin-bottom:1rem">
+            🔑 申请地址：<a href="https://ai.youdao.com/" target="_blank" rel="noopener">https://ai.youdao.com/</a>（开通"词典翻译"服务）
+          </div>
+          <div class="form-row">
+            <div class="form-group">
+              <label>App Key</label>
+              <input type="password" id="cfg-youdao-key" placeholder="未配置，输入后保存" />
+            </div>
+            <div class="form-group">
+              <label>App Secret</label>
+              <input type="password" id="cfg-youdao-secret" placeholder="未配置，输入后保存" />
+            </div>
+          </div>
+          <button class="btn btn-primary btn-sm" onclick="saveDictProvidersConfig('youdao')" style="margin-top:.75rem">保存</button>
+        </div>
+
+        <div class="card">
+          <div class="card-title"><span class="left">ECDICT 离线词典</span></div>
+          <div class="alert alert-info" style="margin-bottom:1rem">
+            💿 数据库下载：<a href="https://github.com/skywind3000/ECDICT" target="_blank" rel="noopener">skywind3000/ECDICT</a>（推荐 stardict.db 或 ecdict.db）
+          </div>
+          <div class="form-row">
+            <div class="form-group" style="flex:1">
+              <label>数据库文件路径</label>
+              <input type="text" id="cfg-ecdict-path" placeholder="/data/ecdict.db" />
+            </div>
+          </div>
+          <button class="btn btn-primary btn-sm" onclick="saveDictProvidersConfig('ecdict')" style="margin-top:.75rem">保存</button>
+        </div>
       </div>
 
       <!-- ── OCR Settings ── -->
@@ -948,16 +994,19 @@ let _runtimeConfig = null;
 let _sysInfo = null;
 
 async function loadProviders() {
-  const [providers, cfg, sys] = await Promise.all([
+  const [provResp, cfgResp, sys] = await Promise.all([
     api('GET', '/api/providers'),
     api('GET', '/admin/config'),
     api('GET', '/admin/system'),
   ]);
-  if (!cfg) return;
+  if (!cfgResp) return;
+  const cfg = cfgResp.config || cfgResp;
+  const providers = (provResp && Array.isArray(provResp.providers)) ? provResp.providers
+                  : (cfgResp.providers || []);
   _runtimeConfig = cfg;
   _sysInfo = sys;
 
-  const currentProvider = cfg.vocab_provider || 'claude';
+  const currentProvider = cfg.vocab_provider || (provResp && provResp.default) || 'claude';
   const sel = document.getElementById('cfg-vocab-provider');
   sel.innerHTML = (providers || []).map(p => `<option value="${p}"${p===currentProvider?' selected':''}>${PROVIDER_META[p]?.name || p}</option>`).join('');
 
@@ -1014,8 +1063,9 @@ async function testProvider(name) {
 
 // ── Text Cleaner ──────────────────────────────────────────────────────────────
 async function loadCleanerConfig() {
-  const cfg = await api('GET', '/admin/config');
-  if (!cfg) return;
+  const cfgResp = await api('GET', '/admin/config');
+  if (!cfgResp) return;
+  const cfg = cfgResp.config || cfgResp;
   const cleaner = cfg.text_cleaner || {};
   document.getElementById('cleaner-enabled').checked = cleaner.enabled || false;
   document.getElementById('cleaner-enabled-lbl').textContent = cleaner.enabled ? '已启用' : '已禁用';
@@ -1042,8 +1092,9 @@ async function saveCleanerConfig() {
 
 // ── LLM Config ────────────────────────────────────────────────────────────────
 async function loadLLMConfig() {
-  const [cfg, sys] = await Promise.all([api('GET', '/admin/config'), api('GET', '/admin/system')]);
-  if (!cfg) return;
+  const [cfgResp, sys] = await Promise.all([api('GET', '/admin/config'), api('GET', '/admin/system')]);
+  if (!cfgResp) return;
+  const cfg = cfgResp.config || cfgResp;
 
   // Key status
   const keys = [
@@ -1073,13 +1124,33 @@ async function loadLLMConfig() {
 
   normalizeLLMConfigLabels();
   const llm = cfg.llm || {};
-  document.getElementById('cfg-anthropic-key').value = llm.anthropic_api_key || '';
-  document.getElementById('cfg-deepseek-key').value = llm.deepseek_api_key || '';
+  const dictCfg = cfg.dict_providers || {};
+  // Show "● 已配置" placeholder when key already exists, but leave the input
+  // blank so the user can type a new value without overwriting on every save.
+  const setKey = (id, val, hasFlag) => {
+    const el = document.getElementById(id);
+    if (!el) return;
+    el.value = '';
+    if (val || hasFlag) el.placeholder = '● 已配置（留空不修改）';
+    else el.placeholder = el.dataset.placeholderEmpty || el.placeholder || '未配置，输入后保存';
+  };
+  setKey('cfg-anthropic-key', llm.anthropic_api_key, sys?.has_anthropic_key);
+  setKey('cfg-deepseek-key', llm.deepseek_api_key, sys?.has_deepseek_key);
+  setKey('cfg-openai-key', llm.openai_api_key, sys?.has_openai_key);
   document.getElementById('cfg-deepseek-model').value = llm.deepseek_model || 'deepseek-chat';
   document.getElementById('cfg-deepseek-url').value = llm.deepseek_base_url || 'https://api.deepseek.com/v1';
-  document.getElementById('cfg-openai-key').value = llm.openai_api_key || '';
   document.getElementById('cfg-openai-model').value = llm.openai_model || 'gpt-4o-mini';
   document.getElementById('cfg-openai-url').value = llm.openai_base_url || '';
+
+  // Dictionary provider keys (Merriam-Webster / YouDao / ECDICT)
+  const mwEl = document.getElementById('cfg-mw-key');
+  if (mwEl) setKey('cfg-mw-key', dictCfg.merriam_webster_key, sys?.has_mw_key);
+  const ydKey = document.getElementById('cfg-youdao-key');
+  if (ydKey) setKey('cfg-youdao-key', dictCfg.youdao_app_key, sys?.has_youdao_key);
+  const ydSec = document.getElementById('cfg-youdao-secret');
+  if (ydSec) setKey('cfg-youdao-secret', dictCfg.youdao_app_secret, sys?.has_youdao_key);
+  const ecEl = document.getElementById('cfg-ecdict-path');
+  if (ecEl) ecEl.value = dictCfg.ecdict_path || '';
 }
 
 function normalizeLLMConfigLabels() {
@@ -1100,42 +1171,68 @@ function normalizeLLMConfigLabels() {
 }
 
 async function saveModelConfig() {
+  const llm = {};
+  const key = document.getElementById('cfg-anthropic-key').value.trim();
+  if (key) llm.anthropic_api_key = key;
   const r = await api('PUT', '/admin/config', {
     ai_model: document.getElementById('cfg-ai-model').value,
     ai_batch_size: parseInt(document.getElementById('cfg-batch-size').value),
-    llm: {
-      anthropic_api_key: document.getElementById('cfg-anthropic-key').value.trim(),
-    },
+    llm,
   });
-  if (r) toast('Claude 配置已保存', 'success');
+  if (r) { toast('Claude 配置已保存', 'success'); loadLLMConfig(); }
 }
 
 async function saveDeepSeekConfig() {
-  const r = await api('PUT', '/admin/config', {
-    llm: {
-      deepseek_api_key: document.getElementById('cfg-deepseek-key').value.trim(),
-      deepseek_model: document.getElementById('cfg-deepseek-model').value,
-      deepseek_base_url: document.getElementById('cfg-deepseek-url').value.trim(),
-    }
-  });
-  if (r) toast('DeepSeek 配置已保存', 'success');
+  const llm = {
+    deepseek_model: document.getElementById('cfg-deepseek-model').value,
+    deepseek_base_url: document.getElementById('cfg-deepseek-url').value.trim(),
+  };
+  const key = document.getElementById('cfg-deepseek-key').value.trim();
+  if (key) llm.deepseek_api_key = key;
+  const r = await api('PUT', '/admin/config', { llm });
+  if (r) { toast('DeepSeek 配置已保存', 'success'); loadLLMConfig(); }
 }
 
 async function saveOpenAIConfig() {
-  const r = await api('PUT', '/admin/config', {
-    llm: {
-      openai_api_key: document.getElementById('cfg-openai-key').value.trim(),
-      openai_model: document.getElementById('cfg-openai-model').value,
-      openai_base_url: document.getElementById('cfg-openai-url').value.trim(),
-    }
-  });
-  if (r) toast('OpenAI 配置已保存', 'success');
+  const llm = {
+    openai_model: document.getElementById('cfg-openai-model').value,
+    openai_base_url: document.getElementById('cfg-openai-url').value.trim(),
+  };
+  const key = document.getElementById('cfg-openai-key').value.trim();
+  if (key) llm.openai_api_key = key;
+  const r = await api('PUT', '/admin/config', { llm });
+  if (r) { toast('OpenAI 配置已保存', 'success'); loadLLMConfig(); }
+}
+
+async function saveDictProvidersConfig(which) {
+  const dict_providers = {};
+  let label = which;
+  if (which === 'mw') {
+    const v = document.getElementById('cfg-mw-key').value.trim();
+    if (!v) { toast('请输入 Merriam-Webster API Key', 'warn'); return; }
+    dict_providers.merriam_webster_key = v;
+    label = 'Merriam-Webster';
+  } else if (which === 'youdao') {
+    const k = document.getElementById('cfg-youdao-key').value.trim();
+    const s = document.getElementById('cfg-youdao-secret').value.trim();
+    if (!k && !s) { toast('请输入有道 App Key 或 Secret', 'warn'); return; }
+    if (k) dict_providers.youdao_app_key = k;
+    if (s) dict_providers.youdao_app_secret = s;
+    label = '有道词典';
+  } else if (which === 'ecdict') {
+    const p = document.getElementById('cfg-ecdict-path').value.trim();
+    dict_providers.ecdict_path = p || null;
+    label = 'ECDICT';
+  }
+  const r = await api('PUT', '/admin/config', { dict_providers });
+  if (r) { toast(label + ' 配置已保存', 'success'); loadLLMConfig(); }
 }
 
 // ── OCR Settings ──────────────────────────────────────────────────────────────
 async function loadOCRSettings() {
-  const cfg = await api('GET', '/admin/config');
-  if (!cfg) return;
+  const cfgResp = await api('GET', '/admin/config');
+  if (!cfgResp) return;
+  const cfg = cfgResp.config || cfgResp;
   const ocr = cfg.ocr || {};
   setVal('ocr-backend', cfg.parse_backend || 'local');
   setVal('ocr-engine', ocr.engine || 'auto');
@@ -1196,7 +1293,7 @@ async function saveMinerUConfig() {
 
 // ── OCR Cache ─────────────────────────────────────────────────────────────────
 async function loadCacheStats() {
-  const [stats, cfg] = await Promise.all([
+  const [stats, cfgResp] = await Promise.all([
     api('GET', '/admin/ocr-cache'),
     api('GET', '/admin/config'),
   ]);
@@ -1205,7 +1302,8 @@ async function loadCacheStats() {
     document.getElementById('cache-size').textContent = stats.total_size_mb + ' MB';
     document.getElementById('cache-dir').textContent = stats.cache_dir;
   }
-  if (cfg) {
+  if (cfgResp) {
+    const cfg = cfgResp.config || cfgResp;
     const en = cfg.ocr_cache_enabled !== false;
     document.getElementById('cache-enabled').checked = en;
     document.getElementById('cache-enabled-lbl').textContent = en ? '已启用' : '已禁用';
@@ -1255,8 +1353,9 @@ async function runOCRTest(file) {
 
 // ── Analysis Defaults ─────────────────────────────────────────────────────────
 async function loadAnalysisDefaults() {
-  const cfg = await api('GET', '/admin/config');
-  if (!cfg) return;
+  const cfgResp = await api('GET', '/admin/config');
+  if (!cfgResp) return;
+  const cfg = cfgResp.config || cfgResp;
   const a = cfg.analysis || {};
   setRange('ana-min-len', a.min_word_length || 2);
   setRange('ana-top-n', a.top_n || 50);

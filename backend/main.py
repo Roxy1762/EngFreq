@@ -2007,6 +2007,7 @@ async def admin_system_info(admin: User = Depends(get_admin_user)):
     from backend.services.ocr_cache import cache_stats
     runtime = get_runtime_config()
     llm = runtime.llm
+    dp = runtime.dict_providers
     return {
         "python_version": sys.version,
         "packages": packages,
@@ -2017,9 +2018,12 @@ async def admin_system_info(admin: User = Depends(get_admin_user)):
         "has_anthropic_key": bool(llm.anthropic_api_key),
         "has_deepseek_key": bool(llm.deepseek_api_key),
         "has_openai_key": bool(llm.openai_api_key),
-        "has_mw_key": bool(settings.merriam_webster_key),
-        "has_youdao_key": bool(settings.youdao_app_key),
-        "has_ecdict": bool(settings.ecdict_path),
+        "has_mw_key": bool(dp.merriam_webster_key or settings.merriam_webster_key),
+        "has_youdao_key": bool(
+            (dp.youdao_app_key and dp.youdao_app_secret)
+            or (settings.youdao_app_key and settings.youdao_app_secret)
+        ),
+        "has_ecdict": bool(dp.ecdict_path or settings.ecdict_path),
         "deepseek_base_url": llm.deepseek_base_url,
         "openai_base_url": llm.openai_base_url or "",
         "ocr_cache": cache_stats(),
