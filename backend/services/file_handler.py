@@ -34,21 +34,30 @@ def _extract_txt(path: Path) -> str:
     return path.read_text(errors="replace")
 
 
+# Count only Latin alphabetic characters when judging whether a PDF has a
+# usable text layer. Scanned Chinese exam PDFs often carry a thin Chinese
+# watermark/header layer that pushes the total char count above the OCR
+# threshold even though no English content is recoverable; without this
+# narrower count, OCR is skipped and the analyzer ends up tokenising garbage.
+def _latin_alpha_count(text: str) -> int:
+    return sum(1 for ch in text if ("A" <= ch <= "Z") or ("a" <= ch <= "z"))
+
+
 def _extract_pdf_pymupdf(path: Path) -> Optional[Tuple[str, int]]:
-    """Primary PDF extractor. Returns (text, total_chars) or None if unavailable."""
+    """Primary PDF extractor. Returns (text, latin_alpha_chars) or None if unavailable."""
     try:
         import fitz   # PyMuPDF
     except ImportError:
         return None
     try:
         pages_text: list[str] = []
-        total_chars = 0
+        latin_chars = 0
         with fitz.open(str(path)) as doc:
             for page in doc:
                 t = page.get_text("text") or ""
                 pages_text.append(t)
-                total_chars += len(t.strip())
-        return "\n".join(pages_text), total_chars
+                latin_chars += _latin_alpha_count(t)
+        return "\n".join(pages_text), latin_chars
     except Exception as exc:   # noqa: BLE001
         logger.warning("PyMuPDF extraction failed for %s: %s — falling back to pdfplumber", path.name, exc)
         return None
@@ -62,13 +71,13 @@ def _extract_pdf_pdfplumber(path: Path) -> Tuple[str, int]:
         raise RuntimeError("No PDF extractor installed. Run: pip install PyMuPDF pdfplumber") from exc
 
     pages_text: list[str] = []
-    total_chars = 0
+    latin_chars = 0
     with pdfplumber.open(str(path)) as pdf:
         for page in pdf.pages:
             t = page.extract_text() or ""
             pages_text.append(t)
-            total_chars += len(t.strip())
-    return "\n".join(pages_text), total_chars
+            latin_chars += _latin_alpha_count(t)
+    return "\n".join(pages_text), latin_chars
 
 
 def _extract_pdf(path: Path) -> Tuple[str, bool]:
@@ -81,7 +90,7 @@ def _extract_pdf(path: Path) -> Tuple[str, bool]:
     result = _extract_pdf_pymupdf(path)
     if result is None:
         result = _extract_pdf_pdfplumber(path)
-    full_text, total_chars = result
+    full_text, latin_chars = result
 
     # Use configurable threshold to decide if PDF is scanned
     try:
@@ -90,10 +99,10 @@ def _extract_pdf(path: Path) -> Tuple[str, bool]:
     except Exception:
         threshold = 50
 
-    if total_chars < threshold:
+    if latin_chars < threshold:
         logger.info(
-            "PDF appears to be scanned (chars=%d < threshold=%d) — falling back to OCR",
-            total_chars, threshold,
+            "PDF has insufficient Latin text (latin_chars=%d < threshold=%d) — falling back to OCR",
+            latin_chars, threshold,
         )
         from backend.services.ocr_service import ocr_pdf
         return ocr_pdf(path), True
