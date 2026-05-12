@@ -36,15 +36,17 @@ import logging
 import os
 import uuid
 from contextlib import asynccontextmanager
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 
 from fastapi import BackgroundTasks, Depends, FastAPI, File, Form, HTTPException, Query, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import HTMLResponse, Response
+from fastapi.responses import FileResponse, HTMLResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
+from starlette.background import BackgroundTask
 
 from backend.auth import (
     create_token,
@@ -2195,6 +2197,201 @@ async def admin_prune_tasks(
         "remaining": _task_store.size(),
         "older_than_seconds": older_than_seconds,
     }
+
+
+# ── Admin: full-server migration (export / import) ───────────────────────────
+#
+# These endpoints let an admin take a portable snapshot of the entire server
+# (DB + user files + wordlists + optional OCR cache) as a single ``.zip``,
+# and restore it on a new host. See ``backend/services/migration_service.py``
+# for the bundle format and safety invariants.
+
+@app.get("/admin/migration/stats")
+async def admin_migration_stats(admin: User = Depends(get_admin_user)):
+    """Counts + on-disk sizes for everything the export would cover."""
+    from backend.services import migration_service
+    return migration_service.server_state_summary()
+
+
+@app.get("/admin/migration/export")
+async def admin_migration_export(
+    include_file_store: bool = Query(True, description="Include data/files/"),
+    include_wordlists: bool = Query(True, description="Include data/wordlists/"),
+    include_ocr_cache: bool = Query(False, description="Include data/ocr_cache/ (large)"),
+    notes: str = Query("", description="Free-form note stored in manifest"),
+    admin: User = Depends(get_admin_user),
+):
+    """Stream a fresh migration bundle for download.
+
+    The file is written to a tempfile and cleaned up via a BackgroundTask after
+    the response is fully sent.
+    """
+    from backend.services import migration_service
+
+    opts = migration_service.ExportOptions(
+        include_file_store=include_file_store,
+        include_wordlists=include_wordlists,
+        include_ocr_cache=include_ocr_cache,
+        notes=notes[:500],
+    )
+    try:
+        tmp_path, manifest = await asyncio.to_thread(
+            migration_service.make_export_tempfile, opts
+        )
+    except Exception as exc:   # noqa: BLE001
+        logger.exception("Migration export failed")
+        raise HTTPException(500, f"导出失败: {exc}") from exc
+
+    ts = manifest.exported_at.replace(":", "").replace("-", "") or datetime.now().strftime("%Y%m%dT%H%M%SZ")
+    filename = f"engfreq-migration-{ts}.zip"
+    return FileResponse(
+        path=str(tmp_path),
+        media_type="application/zip",
+        filename=filename,
+        background=BackgroundTask(migration_service.cleanup_tempfile, tmp_path),
+        headers={
+            "X-Migration-Schema-Version": str(manifest.schema_version),
+            "X-Migration-App-Version": manifest.app_version,
+        },
+    )
+
+
+@app.post("/admin/migration/preview")
+async def admin_migration_preview(
+    file: UploadFile = File(..., description="A previously exported .zip bundle"),
+    admin: User = Depends(get_admin_user),
+):
+    """Inspect a bundle's manifest without applying any changes."""
+    from backend.services import migration_service
+
+    import tempfile as _tempfile
+    suffix = Path(file.filename or "bundle.zip").suffix.lower() or ".zip"
+    with _tempfile.NamedTemporaryFile(prefix="engfreq-preview-", suffix=suffix, delete=False) as tmp:
+        tmp_path = Path(tmp.name)
+    try:
+        data = await file.read()
+        tmp_path.write_bytes(data)
+        return migration_service.preview_bundle(tmp_path)
+    except Exception as exc:   # noqa: BLE001
+        raise HTTPException(400, f"无法读取迁移包: {exc}") from exc
+    finally:
+        tmp_path.unlink(missing_ok=True)
+
+
+@app.post("/admin/migration/import")
+async def admin_migration_import(
+    file: UploadFile = File(..., description="A previously exported .zip bundle"),
+    replace_file_store: bool = Form(False),
+    replace_wordlists: bool = Form(False),
+    replace_ocr_cache: bool = Form(False),
+    dry_run: bool = Form(False),
+    make_safety_backup: bool = Form(True),
+    abort_on_user_conflict: bool = Form(False),
+    admin: User = Depends(get_admin_user),
+):
+    """Apply a migration bundle.
+
+    By default the import:
+      * verifies the bundle's manifest + DB checksum,
+      * writes a safety snapshot of the *current* state to ``data/migration_backups/``,
+      * replaces the live SQLite DB,
+      * merges file_store / wordlists (use ``replace_*=true`` to overwrite),
+      * leaves ocr_cache alone unless the bundle contains it.
+
+    Pass ``dry_run=true`` to validate without touching live state.
+    """
+    from backend.services import migration_service
+
+    import tempfile as _tempfile
+    suffix = Path(file.filename or "bundle.zip").suffix.lower() or ".zip"
+    with _tempfile.NamedTemporaryFile(prefix="engfreq-import-", suffix=suffix, delete=False) as tmp:
+        tmp_path = Path(tmp.name)
+    try:
+        # Read in chunks to avoid loading huge bundles fully into memory.
+        with tmp_path.open("wb") as sink:
+            while True:
+                chunk = await file.read(8 * 1024 * 1024)
+                if not chunk:
+                    break
+                sink.write(chunk)
+
+        opts = migration_service.ImportOptions(
+            replace_file_store=replace_file_store,
+            replace_wordlists=replace_wordlists,
+            replace_ocr_cache=replace_ocr_cache,
+            dry_run=dry_run,
+            make_safety_backup=make_safety_backup,
+            abort_on_user_conflict=abort_on_user_conflict,
+        )
+        report = await migration_service.import_snapshot(tmp_path, opts)
+        if not report.ok:
+            raise HTTPException(400, report.error or "导入失败")
+        return {
+            "ok": True,
+            "dry_run": dry_run,
+            "manifest": report.manifest,
+            "actions": report.actions,
+            "warnings": report.warnings,
+            "safety_backup_path": report.safety_backup_path,
+        }
+    finally:
+        tmp_path.unlink(missing_ok=True)
+
+
+@app.get("/admin/migration/backups")
+async def admin_migration_list_backups(admin: User = Depends(get_admin_user)):
+    """List safety-backup zips written by previous imports."""
+    from backend.services.migration_service import BACKUP_DIR
+    if not BACKUP_DIR.exists():
+        return {"backups": []}
+    entries = []
+    for p in sorted(BACKUP_DIR.glob("*.zip"), reverse=True):
+        try:
+            st = p.stat()
+            entries.append({
+                "name": p.name,
+                "size_bytes": st.st_size,
+                "modified_at": iso_z(datetime.fromtimestamp(st.st_mtime, tz=timezone.utc)),
+            })
+        except OSError:
+            continue
+    return {"backups": entries}
+
+
+@app.get("/admin/migration/backups/{name}")
+async def admin_migration_download_backup(
+    name: str,
+    admin: User = Depends(get_admin_user),
+):
+    """Download a previously written safety backup."""
+    from backend.services.migration_service import BACKUP_DIR
+    # Defense-in-depth: only allow simple filenames in the backup dir
+    if "/" in name or "\\" in name or name.startswith(".") or not name.endswith(".zip"):
+        raise HTTPException(400, "非法的备份文件名")
+    target = (BACKUP_DIR / name).resolve()
+    if BACKUP_DIR.resolve() not in target.parents or not target.exists():
+        raise HTTPException(404, "备份文件不存在")
+    return FileResponse(
+        path=str(target),
+        media_type="application/zip",
+        filename=target.name,
+    )
+
+
+@app.delete("/admin/migration/backups/{name}")
+async def admin_migration_delete_backup(
+    name: str,
+    admin: User = Depends(get_admin_user),
+):
+    """Delete a safety backup."""
+    from backend.services.migration_service import BACKUP_DIR
+    if "/" in name or "\\" in name or name.startswith(".") or not name.endswith(".zip"):
+        raise HTTPException(400, "非法的备份文件名")
+    target = (BACKUP_DIR / name).resolve()
+    if BACKUP_DIR.resolve() not in target.parents or not target.exists():
+        raise HTTPException(404, "备份文件不存在")
+    target.unlink(missing_ok=True)
+    return {"ok": True, "deleted": name}
 
 
 # ── Admin panel SPA ───────────────────────────────────────────────────────────

@@ -40,15 +40,27 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     NLTK_DATA=/usr/local/nltk_data \
     HOST=0.0.0.0 \
-    PORT=8000
+    PORT=8000 \
+    DB_PATH=/app/data/app.db \
+    UPLOAD_DIR=/app/data/uploads \
+    RESULTS_DIR=/app/data/exports \
+    OCR_CACHE_DIR=/app/data/ocr_cache \
+    FILE_STORE_DIR=/app/data/files
 
-# Runtime system libs (OCR + image codecs + PyMuPDF runtime deps)
+# Runtime system libs:
+#   - tesseract + eng pack for OCR fallback
+#   - poppler-utils for pdf2image rasterisation (used when PDFs are scanned)
+#   - libgl1 / libglib2.0-0 for opencv / PyMuPDF / rapidocr ONNX
+#   - curl for HEALTHCHECK
+#   - tini for proper PID-1 signal handling
 RUN apt-get update && apt-get install -y --no-install-recommends \
         tesseract-ocr \
         tesseract-ocr-eng \
+        poppler-utils \
         libgl1 \
         libglib2.0-0 \
         curl \
+        tini \
     && rm -rf /var/lib/apt/lists/*
 
 # Non-root runtime user for the app
@@ -61,7 +73,10 @@ COPY --from=builder /install/nltk_data /usr/local/nltk_data
 # Application code
 COPY --chown=app:app . .
 
-RUN mkdir -p data/uploads data/exports data/ocr_cache data/files \
+# Single /app/data tree holds every piece of mutable state — uploads, OCR
+# cache, persisted file copies, the SQLite DB, AND migration backups — so a
+# single volume mount preserves the entire server.
+RUN mkdir -p data/uploads data/exports data/ocr_cache data/files data/migration_backups \
  && chown -R app:app /app
 
 USER app
@@ -70,4 +85,5 @@ EXPOSE 8000
 HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 \
   CMD curl -fsS http://127.0.0.1:${PORT}/healthz || exit 1
 
+ENTRYPOINT ["/usr/bin/tini", "--"]
 CMD ["python", "run.py", "--prod"]

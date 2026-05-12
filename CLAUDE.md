@@ -41,8 +41,8 @@ Settings are driven by environment variables (`.env` file, or environment):
 - `ADMIN_USERNAME` / `ADMIN_PASSWORD`: Initial admin credentials (default: admin/admin123)
 - `DB_PATH`: SQLite database location (default: app.db)
 - `ANTHROPIC_API_KEY`: Claude API key for vocabulary enrichment
-- `AI_MODEL`: Model to use (default: claude-opus-4-6)
-- `VOCAB_PROVIDER`: Which provider to use by default (claude/free_dict/merriam_webster)
+- `AI_MODEL`: Model to use (default: claude-opus-4-7)
+- `VOCAB_PROVIDER`: Which provider to use by default (claude/deepseek/openai/free_dict/iciba/merriam_webster/youdao/ecdict)
 - `WEIGHT_BODY` / `WEIGHT_STEM` / `WEIGHT_OPTION`: Scoring weights for word occurrence locations
 - `TESSERACT_CMD`: Path to tesseract executable (for OCR on Windows)
 - See [backend/config.py](backend/config.py) for full list.
@@ -72,6 +72,7 @@ Background task system queues analysis jobs asynchronously.
 - **[vocabulary_generator.py](backend/services/vocabulary_generator.py)** — Select provider, enrich lemmas with definitions/examples, prioritize by rarity
 - **[export_service.py](backend/services/export_service.py)** — Convert vocabulary to CSV/XLSX
 - **[word_family.py](backend/services/word_family.py)** — Map lemmas to derivational families (e.g., happy → happiness, happily)
+- **[migration_service.py](backend/services/migration_service.py)** — Full-server export/import (DB via SQLite Backup API + user files + wordlists into a single zip, with manifest, sha256 checksum, path-traversal-safe extraction, automatic rollback snapshots)
 
 ### Vocabulary Provider System ([backend/providers/](backend/providers/))
 Pluggable architecture for enriching words with definitions. Base class: [BaseVocabProvider](backend/providers/base_provider.py).
@@ -237,3 +238,38 @@ See [deploy.bat](deploy.bat) / [deploy.sh](deploy.sh) for production setup scrip
 - Ensure SQLite DB path is persistent (or use external DB)
 - Configure CORS appropriately for frontend domain
 - Set up HTTPS reverse proxy (nginx, etc.)
+
+### Docker deployment
+
+`docker compose up -d --build` mounts a single `engfreq-data` volume at `/app/data` covering DB + uploads + OCR cache + file_store + migration backups. The container's `DB_PATH` is set to `/app/data/app.db` so the database is captured by the volume (and by the migration system).
+
+### One-click server migration
+
+Endpoints (admin-only, JWT auth required):
+- `GET  /admin/migration/stats` — current counts + on-disk sizes
+- `GET  /admin/migration/export?include_file_store=&include_wordlists=&include_ocr_cache=&notes=` — stream a `.zip` snapshot
+- `POST /admin/migration/preview` — multipart upload, validates manifest without applying
+- `POST /admin/migration/import` — multipart upload + `dry_run`/`replace_*`/`make_safety_backup`/`abort_on_user_conflict` flags
+- `GET  /admin/migration/backups` — list rollback snapshots written by previous imports
+- `GET  /admin/migration/backups/{name}` — download a rollback snapshot
+- `DELETE /admin/migration/backups/{name}` — delete one
+
+CLI helpers (uses `.env` admin credentials):
+- `./deploy.sh --migrate-export ./snapshot.zip`
+- `./deploy.sh --migrate-import ./snapshot.zip`
+
+Bundle layout (`engfreq-migration-<ts>.zip`):
+```
+manifest.json         format/schema_version/app_version/exported_at/counts/checksums/includes
+db/app.db             hot snapshot via sqlite3.Connection.backup()
+data/files/...        persistent file copies (FILE_STORE_DIR)
+data/wordlists/...    optional, default included
+data/ocr_cache/...    optional, default excluded (large)
+```
+
+Safety invariants in [migration_service.py](backend/services/migration_service.py):
+- Zip extraction rejects absolute paths and `..` traversal
+- DB checksum is verified before applying
+- A safety snapshot is written to `data/migration_backups/` before any destructive change
+- A module-level asyncio.Lock serialises imports
+- Engine pool is disposed before/after the file swap so subsequent ORM calls open a fresh connection against the restored DB
