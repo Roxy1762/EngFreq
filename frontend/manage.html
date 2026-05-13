@@ -961,6 +961,10 @@ async function loadOverview() {
     <div class="stat-card"><div class="num">${ov.exams}</div><div class="lbl">试卷</div></div>
     <div class="stat-card"><div class="num">${ov.dicts}</div><div class="lbl">词汇表</div></div>
     <div class="stat-card"><div class="num">${cache ? cache.count : '—'}</div><div class="lbl">OCR缓存条目</div></div>
+    <div class="stat-card"><div class="num">${ov.library_total ?? '—'}</div><div class="lbl">生词本</div></div>
+    <div class="stat-card"><div class="num">${ov.library_mastered ?? '—'}</div><div class="lbl">已掌握</div></div>
+    <div class="stat-card"><div class="num">${ov.review_total ?? '—'}</div><div class="lbl">复习队列</div></div>
+    <div class="stat-card"><div class="num">${ov.review_events_total ?? '—'}</div><div class="lbl">累计复习</div></div>
   `;
 
   const providers = ov.providers || [];
