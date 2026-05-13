@@ -3,13 +3,18 @@
 # Production deployment helper.
 #
 # Usage:
-#   ./deploy.sh                 # bootstrap + start in prod mode (foreground)
-#   ./deploy.sh --daemon        # bootstrap + start in background (nohup, logs to data/server.log)
-#   ./deploy.sh --docker        # build and start with docker compose
-#   ./deploy.sh --restart       # stop, reinstall deps, restart daemon
-#   ./deploy.sh --stop          # stop running daemon
-#   ./deploy.sh --status        # report daemon status
-#   ./deploy.sh --healthcheck   # curl the /healthz endpoint once
+#   ./deploy.sh                          # bootstrap + start in prod mode (foreground)
+#   ./deploy.sh --daemon                 # bootstrap + start in background (nohup, logs to data/server.log)
+#   ./deploy.sh --docker                 # build and start with docker compose
+#   ./deploy.sh --restart                # stop, reinstall deps, restart daemon
+#   ./deploy.sh --stop                   # stop running daemon
+#   ./deploy.sh --status                 # report daemon status
+#   ./deploy.sh --healthcheck            # curl the /healthz endpoint once
+#   ./deploy.sh --migrate-export FILE    # download a full-server snapshot to FILE
+#   ./deploy.sh --migrate-import FILE    # apply FILE on the running server (requires admin creds via env)
+#
+# Migration helpers expect the server to be running and ADMIN_USERNAME +
+# ADMIN_PASSWORD env vars (or .env entries) to match the live admin account.
 #
 # Defaults to bootstrap + foreground start. All flags are optional and composable.
 
@@ -33,6 +38,8 @@ mode_restart=0
 mode_stop=0
 mode_status=0
 mode_health=0
+mode_export=""
+mode_import=""
 
 while (($#)); do
   case "$1" in
@@ -42,8 +49,18 @@ while (($#)); do
     --stop) mode_stop=1 ;;
     --status) mode_status=1 ;;
     --healthcheck) mode_health=1 ;;
+    --migrate-export)
+      shift
+      mode_export="${1:-}"
+      [[ -z "$mode_export" ]] && { echo "[ERROR] --migrate-export requires a destination file" >&2; exit 2; }
+      ;;
+    --migrate-import)
+      shift
+      mode_import="${1:-}"
+      [[ -z "$mode_import" ]] && { echo "[ERROR] --migrate-import requires a source file" >&2; exit 2; }
+      ;;
     --help)
-      sed -n '1,20p' "$0"
+      sed -n '1,28p' "$0"
       exit 0
       ;;
     *)
@@ -103,6 +120,81 @@ _healthcheck() {
   return 1
 }
 
+_load_dotenv_admin() {
+  # Pull ADMIN_USERNAME / ADMIN_PASSWORD from .env if not already set, so
+  # users don't have to re-export them when running migration helpers.
+  if [[ -f "$APP_DIR/.env" ]]; then
+    if [[ -z "${ADMIN_USERNAME:-}" ]]; then
+      ADMIN_USERNAME="$(grep -E '^ADMIN_USERNAME=' "$APP_DIR/.env" | tail -1 | cut -d= -f2- | tr -d '\r\n')"
+    fi
+    if [[ -z "${ADMIN_PASSWORD:-}" ]]; then
+      ADMIN_PASSWORD="$(grep -E '^ADMIN_PASSWORD=' "$APP_DIR/.env" | tail -1 | cut -d= -f2- | tr -d '\r\n')"
+    fi
+  fi
+  ADMIN_USERNAME="${ADMIN_USERNAME:-admin}"
+  ADMIN_PASSWORD="${ADMIN_PASSWORD:-}"
+  if [[ -z "$ADMIN_PASSWORD" ]]; then
+    echo "[ERROR] ADMIN_PASSWORD is required for migration helpers (set env or .env)" >&2
+    return 2
+  fi
+}
+
+_admin_token() {
+  # echo a fresh JWT for the admin user; relies on /auth/login
+  local resp
+  resp="$(curl -fsS --max-time 10 -H 'Content-Type: application/json' \
+    -d "$(printf '{"username":"%s","password":"%s"}' "$ADMIN_USERNAME" "$ADMIN_PASSWORD")" \
+    "http://127.0.0.1:${PORT}/auth/login" || true)"
+  # Pull out "token" field without depending on jq
+  python3 - <<EOF
+import json, sys
+try:
+    d = json.loads('''$resp''')
+    print(d.get("token") or d.get("access_token") or "", end="")
+except Exception:
+    pass
+EOF
+}
+
+_migrate_export() {
+  local dest="$1"
+  _load_dotenv_admin || return $?
+  local token; token="$(_admin_token)"
+  if [[ -z "$token" ]]; then
+    echo "[ERROR] Could not authenticate as admin — is the server running?" >&2
+    return 2
+  fi
+  echo "[INFO] Exporting full-server snapshot → $dest"
+  curl -fsSL --max-time 600 \
+    -H "Authorization: Bearer $token" \
+    "http://127.0.0.1:${PORT}/admin/migration/export?include_file_store=true&include_wordlists=true" \
+    -o "$dest"
+  echo "[OK] Snapshot written: $dest ($(stat -c%s "$dest" 2>/dev/null || stat -f%z "$dest") bytes)"
+}
+
+_migrate_import() {
+  local src="$1"
+  if [[ ! -f "$src" ]]; then
+    echo "[ERROR] No such file: $src" >&2
+    return 2
+  fi
+  _load_dotenv_admin || return $?
+  local token; token="$(_admin_token)"
+  if [[ -z "$token" ]]; then
+    echo "[ERROR] Could not authenticate as admin — is the server running?" >&2
+    return 2
+  fi
+  echo "[INFO] Importing snapshot from $src"
+  curl -fsS --max-time 1800 \
+    -H "Authorization: Bearer $token" \
+    -F "file=@$src" \
+    -F "dry_run=false" \
+    -F "make_safety_backup=true" \
+    "http://127.0.0.1:${PORT}/admin/migration/import"
+  echo
+  echo "[OK] Import request completed."
+}
+
 # ── Dispatch single-action flags ──────────────────────────────────────────────
 
 if ((mode_stop)); then
@@ -117,6 +209,16 @@ fi
 
 if ((mode_health)); then
   _healthcheck
+  exit $?
+fi
+
+if [[ -n "$mode_export" ]]; then
+  _migrate_export "$mode_export"
+  exit $?
+fi
+
+if [[ -n "$mode_import" ]]; then
+  _migrate_import "$mode_import"
   exit $?
 fi
 

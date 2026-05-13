@@ -10,6 +10,7 @@
 - 多种词汇补全来源，可接 Claude、DeepSeek、OpenAI 兼容接口、词典 API
 - CSV / XLSX 导出
 - 试卷结果和词汇表分享码
+- 一键服务器迁移：导出/导入完整数据快照（数据库 + 用户文件 + 词表）
 
 ## 项目结构
 
@@ -101,9 +102,69 @@ git branch -M main
 git push -u origin main
 ```
 
+## 服务器一键迁移
+
+整台服务器（数据库 + 用户上传文件 + 词表 + 可选的 OCR 缓存）可以被打包成一个 `.zip`，在新机器上一键还原。
+
+### 通过管理后台（推荐）
+
+1. 在源服务器登录 `/admin-panel`，进入「数据迁移」标签
+2. 勾选要包含的内容（用户文件、词表、OCR 缓存），点击 **生成并下载快照**
+3. 在目标服务器上完成基本部署（同样的 `start.sh` 或 `docker compose up`）并以管理员身份登录
+4. 进入「数据迁移」，选择刚才下载的 `.zip`
+5. 建议先点 **试运行** 校验，再点 **立即导入**
+
+导入会自动把目标服务器当前状态备份到 `data/migration_backups/`，可在同一界面下载或删除。
+
+### 通过命令行
+
+源机器：
+
+```bash
+./deploy.sh --migrate-export ./snapshot.zip
+```
+
+目标机器（部署后启动）：
+
+```bash
+./deploy.sh --migrate-import ./snapshot.zip
+```
+
+两个命令都需要 `.env` 或环境变量提供 `ADMIN_USERNAME` / `ADMIN_PASSWORD`，并要求服务正在运行。
+
+### 直接调用 API
+
+```bash
+# 取 token
+TOKEN=$(curl -s -H 'Content-Type: application/json' \
+  -d '{"username":"admin","password":"yourpw"}' \
+  http://host:8000/auth/login | jq -r .token)
+
+# 导出
+curl -L -H "Authorization: Bearer $TOKEN" \
+  'http://host:8000/admin/migration/export?include_file_store=true' \
+  -o snapshot.zip
+
+# 导入（先试运行）
+curl -H "Authorization: Bearer $TOKEN" \
+  -F "file=@snapshot.zip" -F "dry_run=true" \
+  http://host2:8000/admin/migration/import
+```
+
+迁移包结构：
+
+```
+manifest.json             # 版本、计数、SHA-256 校验
+db/app.db                 # 通过 SQLite Backup API 生成的一致性快照
+data/files/...            # 持久化的上传文件副本
+data/wordlists/...        # 词表（可选）
+data/ocr_cache/...        # OCR 缓存（可选，默认关闭）
+```
+
 ## 注意事项
 
 - 不要把真实 `.env` 提交到仓库
 - 不要把 `app.db`、`secret.key`、`.venv/` 上传到 GitHub
 - 生产环境请务必修改默认管理员密码
+- 迁移导入会替换数据库，请始终先做 **试运行**（系统也会自动生成回滚快照）
 

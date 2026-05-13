@@ -235,6 +235,9 @@ tr:hover td { background: #f8fafc; }
       <button class="nav-item" onclick="nav('system',this)" data-section="system">
         <span class="icon">🖥️</span><span>系统信息</span>
       </button>
+      <button class="nav-item" onclick="nav('migration',this)" data-section="migration">
+        <span class="icon">📦</span><span>数据迁移</span>
+      </button>
     </nav>
     <div class="sidebar-footer">
       <div class="user-info" id="sidebar-user">未登录</div>
@@ -360,6 +363,85 @@ tr:hover td { background: #f8fafc; }
         </div>
       </div>
 
+      <!-- ── Data migration ── -->
+      <div class="section" id="sec-migration">
+        <div class="card">
+          <div class="card-title">服务器迁移：导出 / 导入快照</div>
+          <p style="font-size:.85rem;color:var(--muted);margin-bottom:1rem">
+            一键导出整台服务器的全部数据为单个 <code>.zip</code> 包（含数据库、用户文件、词表），
+            在新机器部署本程序后上传即可还原。导入前会自动生成回滚快照。
+          </p>
+
+          <div class="card" style="background:var(--bg-2);box-shadow:none;padding:1rem;margin-bottom:1rem">
+            <div style="font-size:.82rem;color:var(--muted);text-transform:uppercase;letter-spacing:.04em;font-weight:700;margin-bottom:.5rem">
+              当前服务器状态
+            </div>
+            <div id="migration-stats">加载中…</div>
+          </div>
+
+          <h4 style="font-size:.85rem;font-weight:700;margin:1rem 0 .5rem">导出</h4>
+          <div style="display:flex;flex-wrap:wrap;gap:1rem;align-items:center;margin-bottom:.75rem">
+            <label style="display:flex;align-items:center;gap:.35rem;font-size:.85rem">
+              <input type="checkbox" id="exp-files" checked> 包含用户文件 (data/files)
+            </label>
+            <label style="display:flex;align-items:center;gap:.35rem;font-size:.85rem">
+              <input type="checkbox" id="exp-wordlists" checked> 包含词表 (data/wordlists)
+            </label>
+            <label style="display:flex;align-items:center;gap:.35rem;font-size:.85rem">
+              <input type="checkbox" id="exp-ocr-cache"> 包含 OCR 缓存（较大）
+            </label>
+          </div>
+          <div style="display:flex;gap:.5rem;align-items:center;flex-wrap:wrap;margin-bottom:.5rem">
+            <input class="cfg-input" id="exp-notes" type="text" placeholder="备注（可选，保留在 manifest 中）"
+                   style="flex:1;min-width:280px" maxlength="500" />
+            <button class="btn btn-primary" onclick="doMigrationExport()">📥 生成并下载快照</button>
+          </div>
+          <div id="exp-status" style="font-size:.85rem;color:var(--muted)"></div>
+
+          <hr style="margin:1.5rem 0;border:none;border-top:1px solid var(--border)">
+
+          <h4 style="font-size:.85rem;font-weight:700;margin:1rem 0 .5rem">导入</h4>
+          <p style="font-size:.8rem;color:var(--warn,#b45309);margin-bottom:.75rem">
+            ⚠️ 导入会替换数据库内容。默认保留扩展文件并自动生成回滚快照；务必先在新机器尝试 <b>试运行</b>。
+          </p>
+          <div style="display:flex;flex-wrap:wrap;gap:1rem;align-items:center;margin-bottom:.75rem;font-size:.85rem">
+            <label style="display:flex;align-items:center;gap:.35rem">
+              <input type="checkbox" id="imp-replace-files"> 完全替换 data/files
+            </label>
+            <label style="display:flex;align-items:center;gap:.35rem">
+              <input type="checkbox" id="imp-replace-wordlists"> 完全替换 data/wordlists
+            </label>
+            <label style="display:flex;align-items:center;gap:.35rem">
+              <input type="checkbox" id="imp-replace-ocr"> 完全替换 OCR 缓存
+            </label>
+            <label style="display:flex;align-items:center;gap:.35rem">
+              <input type="checkbox" id="imp-safety-backup" checked> 导入前生成回滚快照
+            </label>
+            <label style="display:flex;align-items:center;gap:.35rem">
+              <input type="checkbox" id="imp-abort-conflict"> 用户名冲突时中止
+            </label>
+          </div>
+          <div style="display:flex;gap:.5rem;align-items:center;flex-wrap:wrap">
+            <input type="file" id="imp-file" accept=".zip" style="flex:1;min-width:240px" />
+            <button class="btn btn-outline" onclick="doMigrationImport(true)">🔍 试运行（仅校验）</button>
+            <button class="btn btn-danger" onclick="doMigrationImport(false)">🚀 立即导入</button>
+          </div>
+          <div id="imp-status" style="margin-top:.75rem;font-size:.85rem"></div>
+          <pre id="imp-report" style="display:none;background:var(--bg-2);padding:.75rem;border-radius:.5rem;font-size:.78rem;max-height:320px;overflow:auto;margin-top:.75rem"></pre>
+        </div>
+
+        <div class="card">
+          <div class="card-title">
+            回滚快照
+            <button class="btn btn-outline btn-sm" onclick="loadMigrationBackups()">刷新</button>
+          </div>
+          <p style="font-size:.8rem;color:var(--muted);margin-bottom:.75rem">
+            每次正式导入会先把当前状态写入 <code>data/migration_backups/</code>，可以在这里下载或删除。
+          </p>
+          <div id="migration-backups">加载中…</div>
+        </div>
+      </div>
+
     </div><!-- /content -->
   </div><!-- /main-area -->
 </div><!-- /admin-app -->
@@ -391,10 +473,11 @@ tr:hover td { background: #f8fafc; }
 <script>
 'use strict';
 let ADMIN_TOKEN = localStorage.getItem('admin_token') || '';
-const sections = ['overview','users','codes','config','ocr','system'];
+const sections = ['overview','users','codes','config','ocr','lookup','system','migration'];
 const sectionTitles = {
   overview: '系统概览', users: '用户管理', codes: '试卷 / 词典码',
-  config: '系统配置', ocr: 'OCR 测试', system: '系统信息',
+  config: '系统配置', ocr: 'OCR 测试', lookup: '在线查词',
+  system: '系统信息', migration: '数据迁移',
 };
 let currentSection = 'overview';
 
@@ -491,6 +574,7 @@ async function loadSection(s) {
   else if (s === 'config') await loadConfig();
   else if (s === 'lookup') await loadLookup();
   else if (s === 'system') await loadSystem();
+  else if (s === 'migration') await loadMigration();
 }
 
 // ── Overview ──
@@ -1143,6 +1227,170 @@ async function loadSystem() {
         </div>
       </div>`;
   } catch(e) { el.innerHTML = `<div style="color:var(--danger)">${e.message}</div>`; }
+}
+
+// ── Data migration ──
+function _fmtBytes(n) {
+  if (!n && n !== 0) return '—';
+  if (n < 1024) return n + ' B';
+  if (n < 1024*1024) return (n/1024).toFixed(1) + ' KB';
+  if (n < 1024*1024*1024) return (n/1024/1024).toFixed(1) + ' MB';
+  return (n/1024/1024/1024).toFixed(2) + ' GB';
+}
+
+async function loadMigration() {
+  await Promise.all([loadMigrationStats(), loadMigrationBackups()]);
+}
+
+async function loadMigrationStats() {
+  const el = document.getElementById('migration-stats');
+  el.innerHTML = '<div class="loading">加载中…</div>';
+  try {
+    const resp = await apiFetch('/admin/migration/stats');
+    const data = await resp.json();
+    if (!resp.ok) throw new Error(data.detail || '加载失败');
+    const c = data.counts || {}, s = data.sizes_bytes || {}, p = data.paths || {};
+    el.innerHTML = `
+      <div class="info-grid">
+        <div>
+          <div class="info-row"><span class="info-key">用户</span><span class="info-val">${c.users||0}</span></div>
+          <div class="info-row"><span class="info-key">试卷</span><span class="info-val">${c.exams||0}</span></div>
+          <div class="info-row"><span class="info-key">词典</span><span class="info-val">${c.dicts||0}</span></div>
+          <div class="info-row"><span class="info-key">个人词库</span><span class="info-val">${c.library_words||0}</span></div>
+          <div class="info-row"><span class="info-key">复习项</span><span class="info-val">${c.review_items||0}</span></div>
+          <div class="info-row"><span class="info-key">系统配置</span><span class="info-val">${c.app_settings||0}</span></div>
+        </div>
+        <div>
+          <div class="info-row"><span class="info-key">数据库</span><span class="info-val">${_fmtBytes(s.db)}</span></div>
+          <div class="info-row"><span class="info-key">用户文件</span><span class="info-val">${_fmtBytes(s.file_store)}</span></div>
+          <div class="info-row"><span class="info-key">词表</span><span class="info-val">${_fmtBytes(s.wordlists)}</span></div>
+          <div class="info-row"><span class="info-key">OCR 缓存</span><span class="info-val">${_fmtBytes(s.ocr_cache)}</span></div>
+          <div class="info-row"><span class="info-key">DB 路径</span><span class="info-val" style="font-size:.72rem">${esc(p.db_path||'—')}</span></div>
+        </div>
+      </div>`;
+  } catch(e) {
+    el.innerHTML = `<div style="color:var(--danger)">${e.message}</div>`;
+  }
+}
+
+async function doMigrationExport() {
+  const status = document.getElementById('exp-status');
+  status.textContent = '正在生成快照，文件较大时请耐心等待…';
+  const params = new URLSearchParams({
+    include_file_store: document.getElementById('exp-files').checked,
+    include_wordlists: document.getElementById('exp-wordlists').checked,
+    include_ocr_cache: document.getElementById('exp-ocr-cache').checked,
+    notes: document.getElementById('exp-notes').value || '',
+  });
+  try {
+    const resp = await apiFetch('/admin/migration/export?' + params.toString());
+    if (!resp.ok) {
+      let detail = '导出失败';
+      try { const j = await resp.json(); detail = j.detail || detail; } catch(_) {}
+      throw new Error(detail);
+    }
+    const blob = await resp.blob();
+    const cd = resp.headers.get('Content-Disposition') || '';
+    const match = cd.match(/filename="?([^";]+)"?/);
+    const fname = match ? match[1] : 'engfreq-migration.zip';
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url; a.download = fname; document.body.appendChild(a); a.click();
+    a.remove(); URL.revokeObjectURL(url);
+    status.textContent = `✓ 已下载 ${fname}（${_fmtBytes(blob.size)}）`;
+  } catch(e) {
+    status.innerHTML = `<span style="color:var(--danger)">${esc(e.message)}</span>`;
+  }
+}
+
+async function doMigrationImport(dryRun) {
+  const status = document.getElementById('imp-status');
+  const reportEl = document.getElementById('imp-report');
+  reportEl.style.display = 'none';
+  const fileInput = document.getElementById('imp-file');
+  if (!fileInput.files.length) {
+    status.innerHTML = '<span style="color:var(--danger)">请先选择迁移包 (.zip)</span>';
+    return;
+  }
+  const file = fileInput.files[0];
+  if (!dryRun) {
+    const msg = '确定要导入此迁移包吗？\n这将替换当前数据库内容。\n（系统会自动生成回滚快照，但仍建议先试运行）';
+    if (!confirm(msg)) return;
+  }
+  const fd = new FormData();
+  fd.append('file', file);
+  fd.append('replace_file_store', document.getElementById('imp-replace-files').checked);
+  fd.append('replace_wordlists', document.getElementById('imp-replace-wordlists').checked);
+  fd.append('replace_ocr_cache', document.getElementById('imp-replace-ocr').checked);
+  fd.append('make_safety_backup', document.getElementById('imp-safety-backup').checked);
+  fd.append('abort_on_user_conflict', document.getElementById('imp-abort-conflict').checked);
+  fd.append('dry_run', dryRun ? 'true' : 'false');
+
+  status.innerHTML = `<span class="loading">${dryRun?'校验中':'正在导入'}…</span>`;
+  try {
+    const resp = await apiFetch('/admin/migration/import', {method:'POST', body: fd});
+    const data = await resp.json();
+    if (!resp.ok) throw new Error(data.detail || '导入失败');
+    status.innerHTML = `<span style="color:var(--ok,#16a34a)">${dryRun?'✓ 试运行通过':'✓ 导入完成'}</span>`;
+    reportEl.style.display = 'block';
+    reportEl.textContent = JSON.stringify(data, null, 2);
+    if (!dryRun) {
+      await loadMigrationStats();
+      await loadMigrationBackups();
+    }
+  } catch(e) {
+    status.innerHTML = `<span style="color:var(--danger)">${esc(e.message)}</span>`;
+  }
+}
+
+async function loadMigrationBackups() {
+  const el = document.getElementById('migration-backups');
+  if (!el) return;
+  el.innerHTML = '<div class="loading">加载中…</div>';
+  try {
+    const resp = await apiFetch('/admin/migration/backups');
+    const data = await resp.json();
+    if (!resp.ok) throw new Error(data.detail || '加载失败');
+    const items = data.backups || [];
+    if (!items.length) { el.innerHTML = '<div class="loading">暂无回滚快照</div>'; return; }
+    el.innerHTML = `<div class="tbl-wrap"><table>
+      <thead><tr><th>名称</th><th>大小</th><th>生成时间</th><th>操作</th></tr></thead>
+      <tbody>${items.map(b => `
+        <tr>
+          <td style="font-family:monospace;font-size:.8rem">${esc(b.name)}</td>
+          <td>${_fmtBytes(b.size_bytes)}</td>
+          <td style="font-size:.78rem;color:var(--muted)">${fmtDate(b.modified_at)}</td>
+          <td>
+            <div style="display:flex;gap:.4rem;flex-wrap:wrap">
+              <button class="btn btn-outline btn-sm" onclick="downloadMigrationBackup('${esc(b.name)}')">下载</button>
+              <button class="btn btn-danger btn-sm" onclick="deleteMigrationBackup('${esc(b.name)}')">删除</button>
+            </div>
+          </td>
+        </tr>`).join('')}
+      </tbody></table></div>`;
+  } catch(e) { el.innerHTML = `<div style="color:var(--danger)">${e.message}</div>`; }
+}
+
+async function downloadMigrationBackup(name) {
+  try {
+    const resp = await apiFetch(`/admin/migration/backups/${encodeURIComponent(name)}`);
+    if (!resp.ok) { let d='下载失败'; try{const j=await resp.json();d=j.detail||d;}catch(_){} throw new Error(d); }
+    const blob = await resp.blob();
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url; a.download = name; document.body.appendChild(a); a.click();
+    a.remove(); URL.revokeObjectURL(url);
+  } catch(e) { alert(e.message); }
+}
+
+async function deleteMigrationBackup(name) {
+  if (!confirm(`确认删除回滚快照「${name}」？`)) return;
+  try {
+    const resp = await apiFetch(`/admin/migration/backups/${encodeURIComponent(name)}`, {method:'DELETE'});
+    const data = await resp.json();
+    if (!resp.ok) throw new Error(data.detail || '删除失败');
+    await loadMigrationBackups();
+  } catch(e) { alert(e.message); }
 }
 
 // Close modal on backdrop click

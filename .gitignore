@@ -39,6 +39,7 @@ data/uploads/
 data/exports/
 data/ocr_cache/
 data/files/
+data/migration_backups/
 
 # Logs
 *.log
