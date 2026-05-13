@@ -67,6 +67,9 @@ from backend.models.schemas import (
     LemmaEntry,
     LibraryAddRequest,
     LibraryBulkAddRequest,
+    LibraryBulkDeleteRequest,
+    LibraryBulkMasterRequest,
+    LibraryBulkTagRequest,
     LibraryUpdateRequest,
     LookupRequest,
     MultiExamRequest,
@@ -360,16 +363,40 @@ def _sync_task_result(task_id: str, result: AnalysisResult, dict_code: Optional[
 
 
 def _admin_overview_payload(db: Session) -> dict:
-    users = db.query(User).all()
-    exams = db.query(Exam).all()
-    dicts = db.query(DictModel).all()
+    from sqlalchemy import case, func
+
+    from backend.database import LibraryWord, ReviewEvent, ReviewItem
+
+    # Previously this loaded full User/Exam/Dict tables into memory just to
+    # count rows. The hot version below uses SQL aggregation only — bounded
+    # work regardless of dataset size.
+    users, admins = db.query(
+        func.count(User.id),
+        func.coalesce(func.sum(case((User.is_admin.is_(True), 1), else_=0)), 0),
+    ).one()
+    exams, raw_parse_count = db.query(
+        func.count(Exam.id),
+        func.coalesce(func.sum(case((Exam.raw_parse_result_json.isnot(None), 1), else_=0)), 0),
+    ).one()
+    dicts = db.query(func.count(DictModel.id)).scalar() or 0
+    library_total = db.query(func.count(LibraryWord.id)).scalar() or 0
+    library_mastered = db.query(func.count(LibraryWord.id)).filter(
+        LibraryWord.mastered.is_(True)
+    ).scalar() or 0
+    review_total = db.query(func.count(ReviewItem.id)).scalar() or 0
+    review_events_total = db.query(func.count(ReviewEvent.id)).scalar() or 0
+
     config = get_runtime_config(db)
     return {
-        "users": len(users),
-        "admins": sum(1 for user in users if user.is_admin),
-        "exams": len(exams),
-        "dicts": len(dicts),
-        "raw_parse_count": sum(1 for exam in exams if exam.raw_parse_result_json),
+        "users": int(users or 0),
+        "admins": int(admins or 0),
+        "exams": int(exams or 0),
+        "dicts": int(dicts),
+        "raw_parse_count": int(raw_parse_count or 0),
+        "library_total": int(library_total),
+        "library_mastered": int(library_mastered),
+        "review_total": int(review_total),
+        "review_events_total": int(review_events_total),
         "providers": available_providers(),
         "runtime_config": config.model_dump(),
         "ocr_capabilities": frontend_config_payload()["ocr_capabilities"],
@@ -1511,14 +1538,22 @@ async def library_list(
     search: Optional[str] = Query(None),
     limit: int = Query(200, ge=1, le=1000),
     offset: int = Query(0, ge=0),
+    mastered: Optional[str] = Query(None, description="active | mastered | all (default: all)"),
 ):
     runtime = get_runtime_config(db)
     if not runtime.library_enabled:
         raise HTTPException(403, "生词本功能已关闭")
     from backend.services import library_service
+    include_mastered = True
+    only_mastered = False
+    if mastered == "active":
+        include_mastered = False
+    elif mastered == "mastered":
+        only_mastered = True
     return {
         "items": library_service.list_library(
             db, user_id=user.id, tag=tag, search=search, limit=limit, offset=offset,
+            include_mastered=include_mastered, only_mastered=only_mastered,
         ),
     }
 
@@ -1595,6 +1630,54 @@ async def library_delete(
     if not library_service.remove_library_word(db, user_id=user.id, word_id=word_id):
         raise HTTPException(404, "生词不存在")
     return {"ok": True}
+
+
+@app.post("/api/library/bulk-delete")
+async def library_bulk_delete(
+    body: LibraryBulkDeleteRequest,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    runtime = get_runtime_config(db)
+    if not runtime.library_enabled:
+        raise HTTPException(403, "生词本功能已关闭")
+    from backend.services import library_service
+    n = library_service.bulk_delete_library(db, user_id=user.id, word_ids=body.word_ids)
+    return {"ok": True, "deleted": n}
+
+
+@app.post("/api/library/bulk-master")
+async def library_bulk_master(
+    body: LibraryBulkMasterRequest,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    runtime = get_runtime_config(db)
+    if not runtime.library_enabled:
+        raise HTTPException(403, "生词本功能已关闭")
+    from backend.services import library_service
+    n = library_service.bulk_set_mastered(
+        db, user_id=user.id, word_ids=body.word_ids, mastered=body.mastered,
+    )
+    return {"ok": True, "updated": n, "mastered": body.mastered}
+
+
+@app.post("/api/library/bulk-tag")
+async def library_bulk_tag(
+    body: LibraryBulkTagRequest,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    runtime = get_runtime_config(db)
+    if not runtime.library_enabled:
+        raise HTTPException(403, "生词本功能已关闭")
+    if not body.add and not body.remove:
+        raise HTTPException(400, "请至少提供 add 或 remove 中的一项")
+    from backend.services import library_service
+    n = library_service.bulk_apply_tags(
+        db, user_id=user.id, word_ids=body.word_ids, add=body.add, remove=body.remove,
+    )
+    return {"ok": True, "updated": n}
 
 
 @app.get("/api/library/stats")
@@ -1749,6 +1832,27 @@ async def review_stats_endpoint(
 ):
     from backend.services import library_service
     return library_service.review_stats(db, user_id=user.id)
+
+
+@app.get("/api/review/heatmap")
+async def review_heatmap_endpoint(
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+    days: int = Query(30, ge=1, le=365),
+):
+    """Per-day review activity (last N days) for the calendar/heatmap UI."""
+    from backend.services import library_service
+    return library_service.review_heatmap(db, user_id=user.id, days=days)
+
+
+@app.get("/api/review/streak")
+async def review_streak_endpoint(
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Daily review streak (current + longest run of consecutive days)."""
+    from backend.services import library_service
+    return library_service.review_streak(db, user_id=user.id)
 
 
 # ── Public share endpoints ────────────────────────────────────────────────────

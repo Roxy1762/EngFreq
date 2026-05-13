@@ -18,9 +18,12 @@ pytesseract>=0.3.10
 # fails, try onnxruntime-openvino or onnxruntime-gpu as an alternative.
 onnxruntime>=1.16.0,<2.0
 rapidocr>=3.1.0
-# Frequency scoring (Zipf) and CEFR classification
+# Frequency scoring (Zipf) and CEFR classification.
+# cefrpy is OPTIONAL — wordlist_service.py degrades gracefully to a Zipf-based
+# heuristic if it can't import. PyPI currently caps at 1.0.2 (no 1.1.x yet),
+# so the upper bound prevents the `make update` install from failing.
 wordfreq>=3.1.1
-cefrpy>=1.1.0
+cefrpy>=1.0.0,<2.0
 # LLM SDKs
 anthropic>=0.40.0
 openai>=1.40.0
