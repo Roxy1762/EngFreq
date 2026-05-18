@@ -217,6 +217,8 @@ F:\0AIDEV2\ENGL1/
 │   │   ├── vocabulary_generator.py
 │   │   ├── export_service.py
 │   │   ├── word_family.py
+│   │   ├── migration_service.py    # Full-server export/import + per-member checksums
+│   │   ├── backup_scheduler.py     # Scheduled automatic backups (async background task)
 │   │   └── ...
 │   └── providers/           # Vocabulary enrichment (pluggable)
 │       ├── base_provider.py
@@ -247,20 +249,25 @@ See [deploy.bat](deploy.bat) / [deploy.sh](deploy.sh) for production setup scrip
 
 Endpoints (admin-only, JWT auth required):
 - `GET  /admin/migration/stats` — current counts + on-disk sizes
-- `GET  /admin/migration/export?include_file_store=&include_wordlists=&include_ocr_cache=&notes=` — stream a `.zip` snapshot
-- `POST /admin/migration/preview` — multipart upload, validates manifest without applying
-- `POST /admin/migration/import` — multipart upload + `dry_run`/`replace_*`/`make_safety_backup`/`abort_on_user_conflict` flags
-- `GET  /admin/migration/backups` — list rollback snapshots written by previous imports
-- `GET  /admin/migration/backups/{name}` — download a rollback snapshot
+- `GET  /admin/migration/export?include_file_store=&include_wordlists=&include_ocr_cache=&compression=&notes=` — stream a `.zip` snapshot (`compression` ∈ `store|fast|balanced|best`)
+- `POST /admin/migration/preview` — multipart upload (streamed to disk), validates manifest without applying
+- `POST /admin/migration/import` — multipart upload + `dry_run`/`replace_*`/`make_safety_backup`/`abort_on_user_conflict`/`verify_all_checksums` flags
+- `GET  /admin/migration/backups` — list every backup (auto/pre-import/manual) with size + category
+- `GET  /admin/migration/backups/{name}` — download a backup
 - `DELETE /admin/migration/backups/{name}` — delete one
+- `POST /admin/migration/backups/{name}/restore` — restore directly from a local backup (no upload)
+- `GET  /admin/migration/schedule` — current automatic-backup schedule + last-run status
+- `PUT  /admin/migration/schedule` — update schedule (`enabled`, `interval_hours`, `retention_count`, `include_*`, `compression`)
+- `POST /admin/migration/schedule/run-now` — trigger an immediate auto-backup
 
 CLI helpers (uses `.env` admin credentials):
-- `./deploy.sh --migrate-export ./snapshot.zip`
+- `./deploy.sh --migrate-export ./snapshot.zip` (set `MIGRATE_COMPRESSION=balanced` to override)
 - `./deploy.sh --migrate-import ./snapshot.zip`
 
-Bundle layout (`engfreq-migration-<ts>.zip`):
+Bundle layout (`engfreq-migration-<ts>.zip`, schema_version=2):
 ```
-manifest.json         format/schema_version/app_version/exported_at/counts/checksums/includes
+manifest.json         format/schema_version/app_version/exported_at/counts/includes/compression
+                      checksums: {arc_name → sha256} for *every* member, not just the DB
 db/app.db             hot snapshot via sqlite3.Connection.backup()
 data/files/...        persistent file copies (FILE_STORE_DIR)
 data/wordlists/...    optional, default included
@@ -269,7 +276,15 @@ data/ocr_cache/...    optional, default excluded (large)
 
 Safety invariants in [migration_service.py](backend/services/migration_service.py):
 - Zip extraction rejects absolute paths and `..` traversal
-- DB checksum is verified before applying
+- Every member's SHA256 is verified before extraction (v2 bundles); v1 bundles fall back to DB-only verification
 - A safety snapshot is written to `data/migration_backups/` before any destructive change
 - A module-level asyncio.Lock serialises imports
 - Engine pool is disposed before/after the file swap so subsequent ORM calls open a fresh connection against the restored DB
+- Transient/hidden files (`*.partial`, `*.tmp`, `*.lock`, `.DS_Store`, …) are skipped on export
+- Restore copies inside data dirs run on a thread pool for many-small-files workloads
+
+Scheduled backups ([backup_scheduler.py](backend/services/backup_scheduler.py)):
+- An asyncio task runs in the background (started by the FastAPI lifespan)
+- Configuration + last-run status persist in the `app_settings` table
+- Files named `auto-YYYYMMDD-HHMMSS.zip` go alongside `pre-import-*.zip` in `data/migration_backups/`
+- Retention prune is per-category: auto-backups are pruned to `retention_count`; pre-import snapshots are kept indefinitely

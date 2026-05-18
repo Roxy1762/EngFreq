@@ -164,10 +164,11 @@ _migrate_export() {
     echo "[ERROR] Could not authenticate as admin — is the server running?" >&2
     return 2
   fi
-  echo "[INFO] Exporting full-server snapshot → $dest"
+  local compression="${MIGRATE_COMPRESSION:-fast}"
+  echo "[INFO] Exporting full-server snapshot → $dest (compression=$compression)"
   curl -fsSL --max-time 600 \
     -H "Authorization: Bearer $token" \
-    "http://127.0.0.1:${PORT}/admin/migration/export?include_file_store=true&include_wordlists=true" \
+    "http://127.0.0.1:${PORT}/admin/migration/export?include_file_store=true&include_wordlists=true&compression=${compression}" \
     -o "$dest"
   echo "[OK] Snapshot written: $dest ($(stat -c%s "$dest" 2>/dev/null || stat -f%z "$dest") bytes)"
 }
