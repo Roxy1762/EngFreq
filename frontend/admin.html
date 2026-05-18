@@ -390,6 +390,15 @@ tr:hover td { background: #f8fafc; }
             <label style="display:flex;align-items:center;gap:.35rem;font-size:.85rem">
               <input type="checkbox" id="exp-ocr-cache"> 包含 OCR 缓存（较大）
             </label>
+            <label style="display:flex;align-items:center;gap:.35rem;font-size:.85rem">
+              压缩级别
+              <select class="cfg-input" id="exp-compression" style="padding:.3rem .5rem;font-size:.82rem">
+                <option value="store">store（不压缩，最快）</option>
+                <option value="fast">fast（速度优先）</option>
+                <option value="balanced" selected>balanced（推荐）</option>
+                <option value="best">best（体积最小，较慢）</option>
+              </select>
+            </label>
           </div>
           <div style="display:flex;gap:.5rem;align-items:center;flex-wrap:wrap;margin-bottom:.5rem">
             <input class="cfg-input" id="exp-notes" type="text" placeholder="备注（可选，保留在 manifest 中）"
@@ -420,6 +429,9 @@ tr:hover td { background: #f8fafc; }
             <label style="display:flex;align-items:center;gap:.35rem">
               <input type="checkbox" id="imp-abort-conflict"> 用户名冲突时中止
             </label>
+            <label style="display:flex;align-items:center;gap:.35rem">
+              <input type="checkbox" id="imp-verify-checksums" checked> 校验全部成员 SHA256
+            </label>
           </div>
           <div style="display:flex;gap:.5rem;align-items:center;flex-wrap:wrap">
             <input type="file" id="imp-file" accept=".zip" style="flex:1;min-width:240px" />
@@ -430,13 +442,73 @@ tr:hover td { background: #f8fafc; }
           <pre id="imp-report" style="display:none;background:var(--bg-2);padding:.75rem;border-radius:.5rem;font-size:.78rem;max-height:320px;overflow:auto;margin-top:.75rem"></pre>
         </div>
 
+        <!-- ── Scheduled automatic backups ── -->
         <div class="card">
           <div class="card-title">
-            回滚快照
+            ⏰ 定时自动备份
+            <button class="btn btn-outline btn-sm" onclick="loadBackupSchedule()">刷新</button>
+          </div>
+          <p style="font-size:.8rem;color:var(--muted);margin-bottom:.75rem">
+            按设定的时间间隔自动生成快照，按保留策略自动清理旧文件。生成的文件以 <code>auto-</code> 开头，可在下方一键还原（无需重新上传）。
+          </p>
+          <div id="schedule-status" style="background:var(--bg-2);padding:.75rem;border-radius:.5rem;margin-bottom:1rem;font-size:.82rem">加载中…</div>
+
+          <div style="display:flex;flex-wrap:wrap;gap:1rem;align-items:center;margin-bottom:.75rem;font-size:.85rem">
+            <label class="toggle-field" style="margin:0">
+              <span>启用调度</span>
+              <label class="switch"><input type="checkbox" id="sched-enabled"><span class="slider"></span></label>
+            </label>
+            <label style="display:flex;align-items:center;gap:.35rem">
+              间隔
+              <select class="cfg-input" id="sched-interval" style="padding:.3rem .5rem;font-size:.82rem">
+                <option value="1">每 1 小时</option>
+                <option value="6">每 6 小时</option>
+                <option value="12">每 12 小时</option>
+                <option value="24" selected>每 24 小时</option>
+                <option value="72">每 3 天</option>
+                <option value="168">每周</option>
+              </select>
+            </label>
+            <label style="display:flex;align-items:center;gap:.35rem">
+              保留份数
+              <input class="cfg-input" type="number" id="sched-retention" min="1" max="50" value="7"
+                     style="width:5rem;padding:.3rem .5rem;font-size:.82rem">
+            </label>
+            <label style="display:flex;align-items:center;gap:.35rem">
+              压缩
+              <select class="cfg-input" id="sched-compression" style="padding:.3rem .5rem;font-size:.82rem">
+                <option value="store">store</option>
+                <option value="fast" selected>fast</option>
+                <option value="balanced">balanced</option>
+                <option value="best">best</option>
+              </select>
+            </label>
+          </div>
+          <div style="display:flex;flex-wrap:wrap;gap:1rem;align-items:center;margin-bottom:.75rem;font-size:.85rem">
+            <label style="display:flex;align-items:center;gap:.35rem">
+              <input type="checkbox" id="sched-files" checked> 含 data/files
+            </label>
+            <label style="display:flex;align-items:center;gap:.35rem">
+              <input type="checkbox" id="sched-wordlists" checked> 含 data/wordlists
+            </label>
+            <label style="display:flex;align-items:center;gap:.35rem">
+              <input type="checkbox" id="sched-ocr"> 含 OCR 缓存
+            </label>
+          </div>
+          <div style="display:flex;gap:.5rem;flex-wrap:wrap">
+            <button class="btn btn-primary" onclick="saveBackupSchedule()">💾 保存计划</button>
+            <button class="btn btn-outline" onclick="runBackupNow()">▶️ 立即备份</button>
+          </div>
+          <div id="sched-msg" style="margin-top:.6rem;font-size:.85rem"></div>
+        </div>
+
+        <div class="card">
+          <div class="card-title">
+            备份历史
             <button class="btn btn-outline btn-sm" onclick="loadMigrationBackups()">刷新</button>
           </div>
           <p style="font-size:.8rem;color:var(--muted);margin-bottom:.75rem">
-            每次正式导入会先把当前状态写入 <code>data/migration_backups/</code>，可以在这里下载或删除。
+            备份目录 <code>data/migration_backups/</code> 中的所有快照，包括定时备份（<code>auto-</code>）、导入前安全备份（<code>pre-import-</code>）。可下载、删除或就地还原。
           </p>
           <div id="migration-backups">加载中…</div>
         </div>
@@ -1239,7 +1311,11 @@ function _fmtBytes(n) {
 }
 
 async function loadMigration() {
-  await Promise.all([loadMigrationStats(), loadMigrationBackups()]);
+  await Promise.all([
+    loadMigrationStats(),
+    loadMigrationBackups(),
+    loadBackupSchedule(),
+  ]);
 }
 
 async function loadMigrationStats() {
@@ -1280,6 +1356,7 @@ async function doMigrationExport() {
     include_file_store: document.getElementById('exp-files').checked,
     include_wordlists: document.getElementById('exp-wordlists').checked,
     include_ocr_cache: document.getElementById('exp-ocr-cache').checked,
+    compression: document.getElementById('exp-compression').value,
     notes: document.getElementById('exp-notes').value || '',
   });
   try {
@@ -1324,6 +1401,7 @@ async function doMigrationImport(dryRun) {
   fd.append('replace_ocr_cache', document.getElementById('imp-replace-ocr').checked);
   fd.append('make_safety_backup', document.getElementById('imp-safety-backup').checked);
   fd.append('abort_on_user_conflict', document.getElementById('imp-abort-conflict').checked);
+  fd.append('verify_all_checksums', document.getElementById('imp-verify-checksums').checked);
   fd.append('dry_run', dryRun ? 'true' : 'false');
 
   status.innerHTML = `<span class="loading">${dryRun?'校验中':'正在导入'}…</span>`;
@@ -1343,6 +1421,13 @@ async function doMigrationImport(dryRun) {
   }
 }
 
+const KIND_BADGES = {
+  'auto':       {label: '自动', color: '#0ea5e9'},
+  'pre-import': {label: '导入前', color: '#b45309'},
+  'manual':     {label: '手动', color: '#16a34a'},
+  'other':      {label: '其他', color: '#64748b'},
+};
+
 async function loadMigrationBackups() {
   const el = document.getElementById('migration-backups');
   if (!el) return;
@@ -1352,21 +1437,26 @@ async function loadMigrationBackups() {
     const data = await resp.json();
     if (!resp.ok) throw new Error(data.detail || '加载失败');
     const items = data.backups || [];
-    if (!items.length) { el.innerHTML = '<div class="loading">暂无回滚快照</div>'; return; }
+    if (!items.length) { el.innerHTML = '<div class="loading">暂无备份</div>'; return; }
     el.innerHTML = `<div class="tbl-wrap"><table>
-      <thead><tr><th>名称</th><th>大小</th><th>生成时间</th><th>操作</th></tr></thead>
-      <tbody>${items.map(b => `
+      <thead><tr><th>名称</th><th>类型</th><th>大小</th><th>生成时间</th><th>操作</th></tr></thead>
+      <tbody>${items.map(b => {
+        const badge = KIND_BADGES[b.kind] || KIND_BADGES.other;
+        return `
         <tr>
-          <td style="font-family:monospace;font-size:.8rem">${esc(b.name)}</td>
+          <td style="font-family:monospace;font-size:.78rem">${esc(b.name)}</td>
+          <td><span style="background:${badge.color};color:#fff;padding:.1rem .5rem;border-radius:.4rem;font-size:.72rem;font-weight:600">${badge.label}</span></td>
           <td>${_fmtBytes(b.size_bytes)}</td>
           <td style="font-size:.78rem;color:var(--muted)">${fmtDate(b.modified_at)}</td>
           <td>
-            <div style="display:flex;gap:.4rem;flex-wrap:wrap">
+            <div style="display:flex;gap:.35rem;flex-wrap:wrap">
               <button class="btn btn-outline btn-sm" onclick="downloadMigrationBackup('${esc(b.name)}')">下载</button>
+              <button class="btn btn-outline btn-sm" onclick="restoreMigrationBackup('${esc(b.name)}', true)" title="试运行（仅校验，不修改数据）">试运行</button>
+              <button class="btn btn-danger btn-sm" onclick="restoreMigrationBackup('${esc(b.name)}', false)">还原</button>
               <button class="btn btn-danger btn-sm" onclick="deleteMigrationBackup('${esc(b.name)}')">删除</button>
             </div>
           </td>
-        </tr>`).join('')}
+        </tr>`;}).join('')}
       </tbody></table></div>`;
   } catch(e) { el.innerHTML = `<div style="color:var(--danger)">${e.message}</div>`; }
 }
@@ -1384,13 +1474,135 @@ async function downloadMigrationBackup(name) {
 }
 
 async function deleteMigrationBackup(name) {
-  if (!confirm(`确认删除回滚快照「${name}」？`)) return;
+  if (!confirm(`确认删除备份「${name}」？`)) return;
   try {
     const resp = await apiFetch(`/admin/migration/backups/${encodeURIComponent(name)}`, {method:'DELETE'});
     const data = await resp.json();
     if (!resp.ok) throw new Error(data.detail || '删除失败');
     await loadMigrationBackups();
   } catch(e) { alert(e.message); }
+}
+
+async function restoreMigrationBackup(name, dryRun) {
+  if (!dryRun) {
+    if (!confirm(`确认从「${name}」还原？\n这将替换当前数据库内容，并自动生成一份新的回滚快照。`)) return;
+  }
+  const status = document.getElementById('imp-status');
+  const reportEl = document.getElementById('imp-report');
+  reportEl.style.display = 'none';
+  status.innerHTML = `<span class="loading">${dryRun?'校验中':'正在从本地备份还原'}…</span>`;
+  try {
+    const fd = new FormData();
+    fd.append('dry_run', dryRun ? 'true' : 'false');
+    fd.append('make_safety_backup', 'true');
+    fd.append('verify_all_checksums', 'true');
+    const resp = await apiFetch(`/admin/migration/backups/${encodeURIComponent(name)}/restore`, {method:'POST', body: fd});
+    const data = await resp.json();
+    if (!resp.ok) throw new Error(data.detail || '还原失败');
+    status.innerHTML = `<span style="color:var(--ok,#16a34a)">${dryRun?'✓ 试运行通过':'✓ 已从本地备份还原'}</span>`;
+    reportEl.style.display = 'block';
+    reportEl.textContent = JSON.stringify(data, null, 2);
+    if (!dryRun) {
+      await loadMigrationStats();
+      await loadMigrationBackups();
+    }
+  } catch(e) {
+    status.innerHTML = `<span style="color:var(--danger)">${esc(e.message)}</span>`;
+  }
+}
+
+// ── Scheduled automatic backups ──
+async function loadBackupSchedule() {
+  const statusEl = document.getElementById('schedule-status');
+  if (!statusEl) return;
+  try {
+    const resp = await apiFetch('/admin/migration/schedule');
+    const data = await resp.json();
+    if (!resp.ok) throw new Error(data.detail || '加载失败');
+    _renderScheduleStatus(statusEl, data);
+    _applyScheduleToForm(data.schedule || {});
+  } catch(e) {
+    statusEl.innerHTML = `<span style="color:var(--danger)">${esc(e.message)}</span>`;
+  }
+}
+
+function _applyScheduleToForm(s) {
+  document.getElementById('sched-enabled').checked = !!s.enabled;
+  if (s.interval_hours) document.getElementById('sched-interval').value = String(s.interval_hours);
+  if (s.retention_count) document.getElementById('sched-retention').value = String(s.retention_count);
+  if (s.compression) document.getElementById('sched-compression').value = s.compression;
+  document.getElementById('sched-files').checked = s.include_file_store !== false;
+  document.getElementById('sched-wordlists').checked = s.include_wordlists !== false;
+  document.getElementById('sched-ocr').checked = !!s.include_ocr_cache;
+}
+
+function _renderScheduleStatus(el, data) {
+  const s = data.schedule || {}, st = data.status || {};
+  const enabled = s.enabled
+    ? '<span style="color:var(--ok,#16a34a);font-weight:600">已启用</span>'
+    : '<span style="color:var(--muted)">未启用</span>';
+  const last = st.last_status === 'success'
+    ? `<span style="color:var(--ok,#16a34a)">✓ 成功</span>`
+    : st.last_status === 'error'
+      ? `<span style="color:var(--danger)">✗ 失败</span>`
+      : '<span style="color:var(--muted)">尚未运行</span>';
+  const lastSize = st.last_size_bytes ? ` (${_fmtBytes(st.last_size_bytes)})` : '';
+  const lastFile = st.last_filename ? ` <code style="font-size:.78rem">${esc(st.last_filename)}</code>` : '';
+  const lastError = st.last_error ? `<div style="color:var(--danger);font-size:.78rem;margin-top:.3rem">${esc(st.last_error)}</div>` : '';
+  el.innerHTML = `
+    <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:.5rem .9rem">
+      <div><span style="color:var(--muted)">状态：</span>${enabled}</div>
+      <div><span style="color:var(--muted)">最近运行：</span>${last}${lastSize}${lastFile}</div>
+      <div><span style="color:var(--muted)">最近时间：</span>${st.last_run_at ? fmtDate(st.last_run_at) : '—'}</div>
+      <div><span style="color:var(--muted)">下次运行：</span>${s.enabled && st.next_run_at ? fmtDate(st.next_run_at) : '—'}</div>
+      <div><span style="color:var(--muted)">累计：</span>${st.runs_total||0} 次（失败 ${st.runs_failed||0}）</div>
+    </div>${lastError}`;
+}
+
+async function saveBackupSchedule() {
+  const msg = document.getElementById('sched-msg');
+  msg.textContent = '保存中…';
+  const payload = {
+    enabled: document.getElementById('sched-enabled').checked,
+    interval_hours: parseInt(document.getElementById('sched-interval').value, 10),
+    retention_count: parseInt(document.getElementById('sched-retention').value, 10) || 7,
+    compression: document.getElementById('sched-compression').value,
+    include_file_store: document.getElementById('sched-files').checked,
+    include_wordlists: document.getElementById('sched-wordlists').checked,
+    include_ocr_cache: document.getElementById('sched-ocr').checked,
+  };
+  try {
+    const resp = await apiFetch('/admin/migration/schedule', {
+      method:'PUT', headers:{'Content-Type':'application/json'}, body: JSON.stringify(payload),
+    });
+    const data = await resp.json();
+    if (!resp.ok) throw new Error(data.detail || '保存失败');
+    msg.innerHTML = '<span style="color:var(--ok,#16a34a)">✓ 已保存</span>';
+    _renderScheduleStatus(document.getElementById('schedule-status'), data);
+  } catch(e) {
+    msg.innerHTML = `<span style="color:var(--danger)">${esc(e.message)}</span>`;
+  }
+}
+
+async function runBackupNow() {
+  const msg = document.getElementById('sched-msg');
+  msg.innerHTML = '<span class="loading">正在生成备份…</span>';
+  try {
+    const fd = new FormData();
+    fd.append('notes', 'Manual via admin panel');
+    const resp = await apiFetch('/admin/migration/schedule/run-now', {method:'POST', body: fd});
+    const data = await resp.json();
+    if (!resp.ok) throw new Error(data.detail || '备份失败');
+    if (data.ok) {
+      msg.innerHTML = `<span style="color:var(--ok,#16a34a)">✓ ${esc(data.status.last_filename || '')} 已生成</span>`;
+    } else {
+      msg.innerHTML = `<span style="color:var(--danger)">备份失败：${esc(data.status.last_error || '')}</span>`;
+    }
+    _renderScheduleStatus(document.getElementById('schedule-status'), data.view || {});
+    await loadMigrationBackups();
+  } catch(e) {
+    msg.innerHTML = `<span style="color:var(--danger)">${esc(e.message)}</span>`;
+  }
 }
 
 // Close modal on backdrop click
