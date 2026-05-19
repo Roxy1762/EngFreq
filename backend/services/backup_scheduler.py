@@ -76,7 +76,18 @@ class BackupRunStatus:
 # event loop.
 _wake_event: Optional[asyncio.Event] = None
 _scheduler_task: Optional[asyncio.Task] = None
-_run_lock = asyncio.Lock()
+# Lazily-created in the running event loop. Creating asyncio primitives at
+# module import time binds them to whichever loop happens to exist (or
+# crashes on Python 3.12+ where no implicit loop is created); deferring to
+# first use guarantees they bind to the live FastAPI loop.
+_run_lock: Optional[asyncio.Lock] = None
+
+
+def _get_run_lock() -> asyncio.Lock:
+    global _run_lock
+    if _run_lock is None:
+        _run_lock = asyncio.Lock()
+    return _run_lock
 
 
 # ── Persistence helpers ─────────────────────────────────────────────────────
@@ -197,7 +208,7 @@ async def trigger_run_now(*, notes: str = "") -> BackupRunStatus:
     Returns the updated status dataclass so callers can show the result
     immediately in the response.
     """
-    async with _run_lock:
+    async with _get_run_lock():
         schedule = get_schedule()
         return await asyncio.to_thread(_do_backup_now, schedule, notes or "Manual trigger")
 
@@ -291,7 +302,7 @@ async def _scheduler_tick() -> None:
     if datetime.now(timezone.utc) < next_at:
         return
 
-    async with _run_lock:
+    async with _get_run_lock():
         # Re-read under the lock to avoid double-runs if another tick already
         # fired between the gate and the lock.
         status = get_status()
@@ -311,12 +322,17 @@ def start_scheduler(loop: Optional[asyncio.AbstractEventLoop] = None) -> None:
     """Start the scheduler task on the running event loop.
 
     Idempotent: a second call while one is already running is a no-op.
+    Must be called from within a running event loop (e.g. the FastAPI lifespan)
+    so the asyncio primitives bind to the correct loop.
     """
     global _scheduler_task, _stop_event
     if _scheduler_task is not None and not _scheduler_task.done():
         return
     _stop_event = asyncio.Event()
-    loop = loop or asyncio.get_event_loop()
+    if loop is None:
+        # get_event_loop() is deprecated when no loop is running; prefer the
+        # explicit running-loop accessor so we fail loudly if mis-invoked.
+        loop = asyncio.get_running_loop()
     _scheduler_task = loop.create_task(_scheduler_loop(_stop_event), name="backup-scheduler")
 
 

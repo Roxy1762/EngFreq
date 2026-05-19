@@ -75,10 +75,18 @@ APP_VERSION = "2.1.0"
 # external dependency; bz2/lzma cost much more CPU for marginal gains on text.
 ZIP_COMPRESSION = zipfile.ZIP_DEFLATED
 
-# Per-import lock so two admin clicks don't race each other. Re-entrant from
-# the scheduler is unnecessary; the scheduler acquires this same lock when it
-# kicks off an automatic export.
-_IMPORT_LOCK = asyncio.Lock()
+# Per-import lock so two admin clicks don't race each other. Created lazily
+# inside the running event loop — creating asyncio primitives at module import
+# time binds them to whichever loop happens to exist and is fragile on
+# Python 3.12+.
+_IMPORT_LOCK: Optional[asyncio.Lock] = None
+
+
+def _get_import_lock() -> asyncio.Lock:
+    global _IMPORT_LOCK
+    if _IMPORT_LOCK is None:
+        _IMPORT_LOCK = asyncio.Lock()
+    return _IMPORT_LOCK
 
 # Where rollback / scheduled snapshots are written.
 BACKUP_DIR = Path(settings.upload_dir).parent / "migration_backups"
@@ -472,7 +480,7 @@ async def import_snapshot(zip_path: Path, options: Optional[ImportOptions] = Non
     Serialised by a module-level lock so concurrent admin imports cannot race.
     """
     opts = options or ImportOptions()
-    async with _IMPORT_LOCK:
+    async with _get_import_lock():
         # The heavy lifting is fully synchronous; run it in a worker thread so
         # we don't stall the event loop while the DB is being swapped out.
         return await asyncio.to_thread(_do_import, zip_path, opts)

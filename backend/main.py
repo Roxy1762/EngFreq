@@ -45,7 +45,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, HTMLResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, joinedload, selectinload
 from starlette.background import BackgroundTask
 
 from backend.auth import (
@@ -73,6 +73,9 @@ from backend.models.schemas import (
     LibraryUpdateRequest,
     LookupRequest,
     MultiExamRequest,
+    QuizGenerateRequest,
+    QuizSubmitRequest,
+    RelatedWordsRequest,
     ReviewSubmitRequest,
     TaskStatus,
     UserProfileUpdate,
@@ -115,8 +118,10 @@ _ADMIN_PASS_IS_DEFAULT = (
 
 
 def _ensure_admin() -> None:
-    db = SessionLocal()
-    try:
+    # Context-manager form guarantees the session is closed even if the
+    # query/insert raises (the previous try/finally pattern was correct, but
+    # this matches the rest of the codebase and reads cleaner).
+    with SessionLocal() as db:
         if not db.query(User).filter_by(username=_ADMIN_USER).first():
             db.add(User(username=_ADMIN_USER, password_hash=hash_password(_ADMIN_PASS), is_admin=True))
             db.commit()
@@ -133,8 +138,6 @@ def _ensure_admin() -> None:
                 "ADMIN_PASSWORD is unset or still the built-in default. "
                 "Anyone who can reach this service can log in — rotate via the admin panel."
             )
-    finally:
-        db.close()
 
 
 _ensure_admin()
@@ -471,6 +474,10 @@ def _user_owns_task(task_id: str, user: User, db: Session) -> bool:
 # ── Code generation helpers ───────────────────────────────────────────────────
 
 def _unique_exam_code(db: Session) -> str:
+    # Best-effort uniqueness: two concurrent inserts can still race past the
+    # SELECT before either commits. The exam_code column carries a UNIQUE
+    # constraint that catches the second insert with an IntegrityError —
+    # callers are expected to surface 5xx in that rare event.
     for _ in range(MAX_UNIQUE_CODE_ATTEMPTS):
         code = generate_code(8)
         if not db.query(Exam).filter_by(exam_code=code).first():
@@ -732,7 +739,9 @@ async def analyze(
     upload_path = Path(settings.upload_dir) / f"{task_id}{suffix}"
 
     # Stream the upload to disk so we can reject oversize files before they
-    # consume the full configured limit of memory.
+    # consume the full configured limit of memory. File writes are pushed onto
+    # the default thread executor — blocking sink.write() in an async handler
+    # stalls every other request for the lifetime of the upload.
     max_bytes = settings.max_upload_mb * 1024 * 1024
     total = 0
     try:
@@ -749,7 +758,7 @@ async def analyze(
                         413,
                         f"上传文件过大（超过 {settings.max_upload_mb} MB）",
                     )
-                sink.write(chunk)
+                await asyncio.to_thread(sink.write, chunk)
     except HTTPException:
         raise
     except Exception:
@@ -970,8 +979,22 @@ async def public_config(db: Session = Depends(get_db)):
 
 @app.get("/api/codes")
 async def get_my_codes(user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    exams = db.query(Exam).filter_by(user_id=user.id).order_by(Exam.created_at.desc()).all()
-    dicts = db.query(DictModel).filter_by(user_id=user.id).order_by(DictModel.created_at.desc()).all()
+    # Eager-load `exam.dicts` and `dict.exam` so the JSON build doesn't trigger
+    # a fresh SELECT per row (was O(n) extra queries before).
+    exams = (
+        db.query(Exam)
+        .options(selectinload(Exam.dicts))
+        .filter_by(user_id=user.id)
+        .order_by(Exam.created_at.desc())
+        .all()
+    )
+    dicts = (
+        db.query(DictModel)
+        .options(joinedload(DictModel.exam))
+        .filter_by(user_id=user.id)
+        .order_by(DictModel.created_at.desc())
+        .all()
+    )
     return {
         "exams": [
             {
@@ -1064,13 +1087,17 @@ async def delete_vocab_entry(
     if exam is None:
         exam = db.query(Exam).filter_by(task_id=task_id).first()
 
-    original_len = len(task.result.vocab_table)
-    task.result.vocab_table = [
+    # Validate the target exists in the candidate list before mutating any
+    # state, so a 404 (typo) doesn't leave the in-memory and on-disk vocab
+    # tables out of sync.
+    target = headword.lower()
+    pruned = [
         item for item in task.result.vocab_table
-        if item.headword.lower() != headword.lower() and item.lemma.lower() != headword.lower()
+        if item.headword.lower() != target and item.lemma.lower() != target
     ]
-    if len(task.result.vocab_table) == original_len:
+    if len(pruned) == len(task.result.vocab_table):
         raise HTTPException(404, "词汇不存在")
+    task.result.vocab_table = pruned
 
     if exam:
         _persist_exam_result(db, exam, task.result)
@@ -1232,7 +1259,9 @@ async def update_vocab_selection(
     record.vocab_json = json.dumps([v.model_dump() for v in vocab])
     db.commit()
 
-    # Sync to in-memory task if active
+    # Sync every in-memory task referencing this exam. Stopping at the first
+    # match left later concurrent uploads pointing at a stale selection table
+    # — better to walk the (small) active list and keep them consistent.
     exam = record.exam
     if exam:
         for task_id in list(_task_store.active_task_ids()):
@@ -1242,7 +1271,6 @@ async def update_vocab_selection(
             task = _task_store.get(task_id)
             if task and task.result:
                 task.result.vocab_table = vocab
-            break
 
     return {"ok": True, "updated": len(body.selections), "vocab_count": len(vocab)}
 
@@ -1377,7 +1405,15 @@ async def list_my_exams(
     db: Session = Depends(get_db),
 ):
     """List all exams for the current user with summary info."""
-    exams = db.query(Exam).filter_by(user_id=user.id).order_by(Exam.created_at.desc()).all()
+    # selectinload pulls every exam's dicts in a single batched IN(...) query,
+    # collapsing what was an N+1 across `e.dicts` access in the loop below.
+    exams = (
+        db.query(Exam)
+        .options(selectinload(Exam.dicts))
+        .filter_by(user_id=user.id)
+        .order_by(Exam.created_at.desc())
+        .all()
+    )
     result = []
     for e in exams:
         try:
@@ -1866,6 +1902,165 @@ async def review_streak_endpoint(
     return library_service.review_streak(db, user_id=user.id)
 
 
+# ── Feature: Word relations & smart suggestions ──────────────────────────────
+# Surfaces related words (same family, similar level, library siblings) plus
+# "gap" suggestions — gaokao words the user hasn't added yet. All cheap and
+# offline: no LLM calls.
+
+@app.get("/api/words/related")
+async def words_related(
+    word: str = Query(..., min_length=1, max_length=64),
+    limit: int = Query(20, ge=1, le=100),
+    include_family: bool = Query(True),
+    include_peers: bool = Query(True),
+    include_library_siblings: bool = Query(True),
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Find related words for any input string — anchored on the user's own
+    library context so suggestions know which words you already have."""
+    from backend.services import word_relations
+    return word_relations.related_for_word(
+        db, user_id=user.id, word=word,
+        include_family=include_family,
+        include_peers=include_peers,
+        include_library_siblings=include_library_siblings,
+        limit=limit,
+    )
+
+
+@app.post("/api/words/related")
+async def words_related_post(
+    body: RelatedWordsRequest,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """POST mirror of /api/words/related so the frontend can send a JSON body
+    when toggling several flags at once."""
+    from backend.services import word_relations
+    return word_relations.related_for_word(
+        db, user_id=user.id, word=body.word,
+        include_family=body.include_family,
+        include_peers=body.include_peers,
+        include_library_siblings=body.include_library_siblings,
+        limit=body.limit,
+    )
+
+
+@app.get("/api/library/{word_id}/related")
+async def library_related(
+    word_id: int,
+    limit: int = Query(20, ge=1, le=100),
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Related-word suggestions for an existing library entry — adds the
+    extra 'tag/exam sibling' group on top of the generic word-level lookup."""
+    runtime = get_runtime_config(db)
+    if not runtime.library_enabled:
+        raise HTTPException(403, "生词本功能已关闭")
+    from backend.services import word_relations
+    payload = word_relations.related_for_library_entry(
+        db, user_id=user.id, word_id=word_id, limit=limit,
+    )
+    if payload.get("error") == "not_found":
+        raise HTTPException(404, "生词不存在")
+    return payload
+
+
+@app.get("/api/library/suggestions/gaps")
+async def library_gap_suggestions(
+    limit: int = Query(20, ge=1, le=100),
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """High-value gaokao words the user hasn't added yet. Ranked by exposure
+    across the user's own uploaded exams when history exists, else by global
+    frequency.
+
+    Useful as a "推荐补充" widget on the library dashboard.
+    """
+    runtime = get_runtime_config(db)
+    if not runtime.library_enabled:
+        raise HTTPException(403, "生词本功能已关闭")
+    from backend.services import word_relations
+    return word_relations.suggest_gaps_for_user(db, user_id=user.id, limit=limit)
+
+
+# ── Feature: Practice quiz / self-test ───────────────────────────────────────
+# Builds quiz sessions from the user's library and grades answers offline.
+# Quiz results funnel into the existing ReviewEvent pipeline so the heatmap /
+# streak features automatically incorporate quiz participation.
+
+@app.post("/api/quiz/generate")
+async def quiz_generate(
+    body: QuizGenerateRequest,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Create a new quiz session. Returns a token + the question payload.
+
+    Use ``only_due=true`` to bias toward words whose review is due (spaced
+    repetition); ``tag`` restricts to a specific library tag.
+    """
+    runtime = get_runtime_config(db)
+    if not runtime.library_enabled:
+        raise HTTPException(403, "生词本功能已关闭")
+    from backend.services import quiz_service
+    payload = quiz_service.generate_quiz(
+        db, user_id=user.id,
+        mode=body.mode, size=body.size, num_choices=body.num_choices,
+        tag=body.tag, only_due=body.only_due,
+    )
+    if not payload.get("ok"):
+        # Translate the typed errors into 400s with friendlier messages.
+        if payload.get("error") == "library_too_small":
+            raise HTTPException(
+                400,
+                f"生词本中可用单词不足（需要 {payload['needed']} 个，当前 {payload['available']} 个）",
+            )
+        if payload.get("error") == "no_eligible_questions":
+            raise HTTPException(400, payload.get("tip", "暂无可用题目"))
+        raise HTTPException(400, payload.get("error") or "生成失败")
+    return payload
+
+
+@app.post("/api/quiz/submit")
+async def quiz_submit(
+    body: QuizSubmitRequest,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Grade the submitted answers, return a per-question report, and feed
+    the results into the spaced-repetition pipeline so the heatmap reflects
+    today's quiz."""
+    from backend.services import quiz_service
+    payload = quiz_service.submit_quiz(
+        db, user_id=user.id, token=body.token,
+        answers=[a.model_dump() for a in body.answers],
+        record_review_event=body.record_review_event,
+    )
+    if not payload.get("ok"):
+        err = payload.get("error")
+        if err == "quiz_expired_or_unknown":
+            raise HTTPException(410, "测试已过期或不存在")
+        if err == "wrong_user":
+            raise HTTPException(403, "无权提交此测试")
+        raise HTTPException(400, err or "提交失败")
+    return payload
+
+
+@app.get("/api/quiz/stats")
+async def quiz_stats_endpoint(
+    days: int = Query(30, ge=1, le=365),
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Aggregate quiz/review stats over the last N days."""
+    from backend.services import quiz_service
+    return quiz_service.quiz_stats(db, user_id=user.id, days=days)
+
+
 # ── Public share endpoints ────────────────────────────────────────────────────
 
 @app.get("/api/share/exam/{code}")
@@ -1914,8 +2109,15 @@ async def admin_list_users(
     offset: int = Query(0, ge=0),
 ):
     # Returns an array (legacy shape) — pagination via ?limit=&offset=.
+    # selectinload batches the two relationship fetches so an admin page of
+    # 100 users no longer fires 200 follow-up SELECTs.
     users = (
-        db.query(User).order_by(User.created_at.asc()).offset(offset).limit(limit).all()
+        db.query(User)
+        .options(selectinload(User.exams), selectinload(User.dicts))
+        .order_by(User.created_at.asc())
+        .offset(offset)
+        .limit(limit)
+        .all()
     )
     return [
         {
@@ -1963,10 +2165,20 @@ async def admin_list_codes(
     offset: int = Query(0, ge=0),
 ):
     exams = (
-        db.query(Exam).order_by(Exam.created_at.desc()).offset(offset).limit(limit).all()
+        db.query(Exam)
+        .options(joinedload(Exam.user))
+        .order_by(Exam.created_at.desc())
+        .offset(offset)
+        .limit(limit)
+        .all()
     )
     dicts = (
-        db.query(DictModel).order_by(DictModel.created_at.desc()).offset(offset).limit(limit).all()
+        db.query(DictModel)
+        .options(joinedload(DictModel.user), joinedload(DictModel.exam))
+        .order_by(DictModel.created_at.desc())
+        .offset(offset)
+        .limit(limit)
+        .all()
     )
     return {
         "summary": _admin_overview_payload(db),
@@ -2201,8 +2413,12 @@ async def admin_ocr_test(
     with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
         tmp_path = Path(tmp.name)
     try:
-        tmp_path.write_bytes(await file.read())
-        extracted = extract_text(tmp_path, use_cache=use_cache)
+        payload = await file.read()
+        await asyncio.to_thread(tmp_path.write_bytes, payload)
+        # extract_text is CPU/I-O heavy (PDF rendering, Tesseract).
+        # Running it inline blocks the event loop for tens of seconds on big
+        # scanned PDFs.
+        extracted = await asyncio.to_thread(extract_text, tmp_path, use_cache=use_cache)
         return {
             "filename": file.filename,
             "used_ocr": extracted.used_ocr,
@@ -2381,6 +2597,9 @@ async def _stream_upload_to_disk(file: UploadFile, prefix: str) -> Path:
 
     Returns the staged path. Callers are responsible for unlinking it. Used by
     both ``/preview`` and ``/import`` to avoid loading multi-GB bundles into RAM.
+
+    Disk writes are dispatched to the default thread executor so a multi-GB
+    migration upload doesn't stall every other request on the event loop.
     """
     import tempfile as _tempfile
     suffix = Path(file.filename or "bundle.zip").suffix.lower() or ".zip"
@@ -2392,7 +2611,7 @@ async def _stream_upload_to_disk(file: UploadFile, prefix: str) -> Path:
                 chunk = await file.read(8 * 1024 * 1024)
                 if not chunk:
                     break
-                sink.write(chunk)
+                await asyncio.to_thread(sink.write, chunk)
         return tmp_path
     except Exception:
         tmp_path.unlink(missing_ok=True)

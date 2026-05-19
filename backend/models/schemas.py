@@ -221,6 +221,49 @@ class ReviewSubmitRequest(BaseModel):
     feedback: List[ReviewFeedback] = Field(..., min_length=1, max_length=200)
 
 
+# ── Word relations / suggestions ─────────────────────────────────────────────
+
+
+class RelatedWordsRequest(BaseModel):
+    """Free-form anchor for word-relations: callers POST a word and tweak which
+    relation categories to compute."""
+    word: str = Field(..., min_length=1, max_length=64)
+    limit: int = Field(20, ge=1, le=100)
+    include_family: bool = True
+    include_peers: bool = True
+    include_library_siblings: bool = True
+
+
+# ── Practice quiz ────────────────────────────────────────────────────────────
+
+
+class QuizGenerateRequest(BaseModel):
+    """Configurable quiz session.
+
+    `mode` selects between MCQ-from-definition, MCQ-from-word, fill-in-the-blank,
+    or a mixed-mode quiz that varies the question type per row. `only_due` flips
+    the quiz into spaced-repetition mode by restricting candidates to library
+    entries whose review item is due.
+    """
+    mode: str = Field("mixed", pattern="^(definition_to_word|word_to_definition|fill_in_blank|mixed)$")
+    size: int = Field(10, ge=1, le=50)
+    num_choices: int = Field(4, ge=2, le=6)
+    tag: Optional[str] = None
+    only_due: bool = False
+
+
+class QuizAnswerItem(BaseModel):
+    question_id: str = Field(..., min_length=1, max_length=64)
+    # Answer is either an MCQ index (as string/int) or a typed answer string.
+    answer: str = Field("", max_length=128)
+
+
+class QuizSubmitRequest(BaseModel):
+    token: str = Field(..., min_length=4, max_length=64)
+    answers: List[QuizAnswerItem] = Field(..., min_length=1, max_length=50)
+    record_review_event: bool = True
+
+
 class TaskStatus(BaseModel):
     task_id: str
     status: str           # pending | processing | done | error
