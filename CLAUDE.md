@@ -58,10 +58,13 @@ SQLite database initialized automatically on first run. Schema:
 ## Architecture
 
 ### API Layer ([backend/main.py](backend/main.py))
-FastAPI app with three endpoint categories:
+FastAPI app with these endpoint categories:
 1. **Auth** — `/auth/register`, `/auth/login`, `/auth/me`
 2. **Analysis** — `/api/analyze` (upload + config), `/api/tasks/{id}` (poll/export), `/api/tasks/{id}/vocab` (generate vocab)
-3. **Admin** — `/admin/users`, `/admin/codes` (requires admin JWT)
+3. **Library + review** — `/api/library/*`, `/api/review/*` (per-user vocab notebook + spaced repetition)
+4. **Word relations** — `/api/words/related`, `/api/library/{id}/related`, `/api/library/suggestions/gaps` (offline related-word lookup + gap recommendations)
+5. **Practice quiz** — `/api/quiz/generate`, `/api/quiz/submit`, `/api/quiz/stats` (self-test with auto-grading; results feed into the review heatmap)
+6. **Admin** — `/admin/users`, `/admin/codes`, `/admin/migration/*` (requires admin JWT)
 
 Background task system queues analysis jobs asynchronously.
 
@@ -72,6 +75,8 @@ Background task system queues analysis jobs asynchronously.
 - **[vocabulary_generator.py](backend/services/vocabulary_generator.py)** — Select provider, enrich lemmas with definitions/examples, prioritize by rarity
 - **[export_service.py](backend/services/export_service.py)** — Convert vocabulary to CSV/XLSX
 - **[word_family.py](backend/services/word_family.py)** — Map lemmas to derivational families (e.g., happy → happiness, happily)
+- **[word_relations.py](backend/services/word_relations.py)** — Related-word suggestions: same family, similar difficulty (CEFR + Zipf), library siblings, plus "gap" recommendations from the gaokao 3500 list that the user hasn't saved yet (offline, no LLM calls)
+- **[quiz_service.py](backend/services/quiz_service.py)** — Practice quiz generator + grader. Modes: `definition_to_word`, `word_to_definition`, `fill_in_blank`, `mixed`. Distractors come from peer library entries; scoring feeds into the existing `ReviewEvent`/heatmap pipeline.
 - **[migration_service.py](backend/services/migration_service.py)** — Full-server export/import (DB via SQLite Backup API + user files + wordlists into a single zip, with manifest, sha256 checksum, path-traversal-safe extraction, automatic rollback snapshots)
 
 ### Vocabulary Provider System ([backend/providers/](backend/providers/))
