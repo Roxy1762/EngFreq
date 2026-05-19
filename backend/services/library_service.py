@@ -18,13 +18,14 @@ from __future__ import annotations
 import json
 import logging
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
+from sqlalchemy import case, func
 from sqlalchemy.orm import Session
 
 from backend.database import Dict as DictModel
-from backend.database import LibraryWord, ReviewItem
+from backend.database import LibraryWord, ReviewEvent, ReviewItem
 from backend.models.schemas import LibraryAddRequest
 
 logger = logging.getLogger(__name__)
@@ -65,8 +66,13 @@ class SchedulerOutcome:
 def list_library(
     db: Session, *, user_id: int, tag: Optional[str] = None,
     search: Optional[str] = None, limit: int = 200, offset: int = 0,
+    include_mastered: bool = True, only_mastered: bool = False,
 ) -> List[Dict[str, Any]]:
     q = db.query(LibraryWord).filter(LibraryWord.user_id == user_id)
+    if only_mastered:
+        q = q.filter(LibraryWord.mastered.is_(True))
+    elif not include_mastered:
+        q = q.filter(LibraryWord.mastered.is_(False))
     if tag:
         q = q.filter(LibraryWord.tags.like(f"%{tag.strip().lower()}%"))
     if search:
@@ -120,6 +126,86 @@ def add_library_word(
     db.commit()
     db.refresh(existing)
     return existing, created
+
+
+def bulk_delete_library(
+    db: Session, *, user_id: int, word_ids: Iterable[int],
+) -> int:
+    """Delete many library entries (and their review items) in one round trip."""
+    ids = [int(i) for i in word_ids if i is not None]
+    if not ids:
+        return 0
+    owned = (
+        db.query(LibraryWord.id)
+        .filter(LibraryWord.user_id == user_id, LibraryWord.id.in_(ids))
+        .all()
+    )
+    owned_ids = [row[0] for row in owned]
+    if not owned_ids:
+        return 0
+    db.query(ReviewItem).filter(
+        ReviewItem.user_id == user_id,
+        ReviewItem.library_word_id.in_(owned_ids),
+    ).delete(synchronize_session=False)
+    deleted = (
+        db.query(LibraryWord)
+        .filter(LibraryWord.user_id == user_id, LibraryWord.id.in_(owned_ids))
+        .delete(synchronize_session=False)
+    )
+    db.commit()
+    return int(deleted or 0)
+
+
+def bulk_set_mastered(
+    db: Session, *, user_id: int, word_ids: Iterable[int], mastered: bool,
+) -> int:
+    """Toggle the `mastered` flag on many entries. When mastering, remove them from
+    the active review queue so the user isn't quizzed on archived words."""
+    ids = [int(i) for i in word_ids if i is not None]
+    if not ids:
+        return 0
+    updated = (
+        db.query(LibraryWord)
+        .filter(LibraryWord.user_id == user_id, LibraryWord.id.in_(ids))
+        .update({LibraryWord.mastered: bool(mastered)}, synchronize_session=False)
+    )
+    if mastered and updated:
+        db.query(ReviewItem).filter(
+            ReviewItem.user_id == user_id,
+            ReviewItem.library_word_id.in_(ids),
+        ).delete(synchronize_session=False)
+    db.commit()
+    return int(updated or 0)
+
+
+def bulk_apply_tags(
+    db: Session, *, user_id: int, word_ids: Iterable[int],
+    add: Optional[Iterable[str]] = None, remove: Optional[Iterable[str]] = None,
+) -> int:
+    """Add and/or remove tags on many entries. Returns count actually modified."""
+    add_set = {t.strip().lower() for t in (add or []) if t and t.strip()}
+    remove_set = {t.strip().lower() for t in (remove or []) if t and t.strip()}
+    if not add_set and not remove_set:
+        return 0
+    ids = [int(i) for i in word_ids if i is not None]
+    if not ids:
+        return 0
+    rows = (
+        db.query(LibraryWord)
+        .filter(LibraryWord.user_id == user_id, LibraryWord.id.in_(ids))
+        .all()
+    )
+    modified = 0
+    for row in rows:
+        current = {t for t in (row.tags or "").split(",") if t}
+        new = (current | add_set) - remove_set
+        normalised = ",".join(sorted(new)) or None
+        if normalised != row.tags:
+            row.tags = normalised
+            modified += 1
+    if modified:
+        db.commit()
+    return modified
 
 
 def update_library_word(
@@ -329,6 +415,15 @@ def submit_review_feedback(
     item.review_count = (item.review_count or 0) + 1
     item.last_reviewed_at = now
     item.due_at = now + timedelta(days=interval)
+    # Log every grading so heatmap/streak analytics aren't capped at "last state".
+    db.add(ReviewEvent(
+        user_id=user_id,
+        headword=item.headword,
+        quality=quality,
+        box_before=box_before,
+        box_after=box_after,
+        created_at=now,
+    ))
     db.commit()
     db.refresh(item)
     return SchedulerOutcome(box_before=box_before, box_after=box_after, due_at=item.due_at)
@@ -339,33 +434,54 @@ def library_stats(db: Session, *, user_id: int) -> Dict[str, Any]:
 
     Returns counts broken down by word_level, cefr_level, and source provider,
     plus a count of how many entries are enrolled in the review queue.
+    All breakdowns use SQL GROUP BY so we don't materialise every row.
     """
-    rows = db.query(LibraryWord).filter_by(user_id=user_id).all()
-    by_level: Dict[str, int] = {}
-    by_cefr: Dict[str, int] = {}
-    by_source: Dict[str, int] = {}
-    tag_counts: Dict[str, int] = {}
+    base = db.query(LibraryWord).filter(LibraryWord.user_id == user_id)
     week_cutoff = _utcnow() - timedelta(days=7)
-    last_week = 0
-    for row in rows:
-        lvl = row.word_level or "未分级"
-        by_level[lvl] = by_level.get(lvl, 0) + 1
-        if row.cefr_level:
-            by_cefr[row.cefr_level] = by_cefr.get(row.cefr_level, 0) + 1
-        if row.source:
-            by_source[row.source] = by_source.get(row.source, 0) + 1
-        for tag in (row.tags or "").split(","):
+
+    total, mastered, last_week = db.query(
+        func.count(LibraryWord.id),
+        func.coalesce(func.sum(case((LibraryWord.mastered.is_(True), 1), else_=0)), 0),
+        func.coalesce(func.sum(case((LibraryWord.created_at >= week_cutoff, 1), else_=0)), 0),
+    ).filter(LibraryWord.user_id == user_id).one()
+
+    by_level = {
+        (lvl or "未分级"): cnt
+        for lvl, cnt in db.query(LibraryWord.word_level, func.count(LibraryWord.id))
+            .filter(LibraryWord.user_id == user_id)
+            .group_by(LibraryWord.word_level)
+            .all()
+    }
+    by_cefr = {
+        lvl: cnt
+        for lvl, cnt in db.query(LibraryWord.cefr_level, func.count(LibraryWord.id))
+            .filter(LibraryWord.user_id == user_id, LibraryWord.cefr_level.isnot(None))
+            .group_by(LibraryWord.cefr_level)
+            .all()
+    }
+    by_source = {
+        src: cnt
+        for src, cnt in db.query(LibraryWord.source, func.count(LibraryWord.id))
+            .filter(LibraryWord.user_id == user_id, LibraryWord.source.isnot(None))
+            .group_by(LibraryWord.source)
+            .all()
+    }
+
+    # Tags still need a single full scan of the (small) tags column, but we
+    # only pull the column itself, not whole rows.
+    tag_counts: Dict[str, int] = {}
+    for (raw,) in base.with_entities(LibraryWord.tags).filter(LibraryWord.tags.isnot(None)).all():
+        for tag in (raw or "").split(","):
             tag = tag.strip()
             if tag:
                 tag_counts[tag] = tag_counts.get(tag, 0) + 1
-        if row.created_at and row.created_at >= week_cutoff:
-            last_week += 1
 
-    review_enrolled = db.query(ReviewItem).filter_by(user_id=user_id).count()
+    review_enrolled = db.query(func.count(ReviewItem.id)).filter(ReviewItem.user_id == user_id).scalar() or 0
     return {
-        "total": len(rows),
-        "added_last_7_days": last_week,
-        "review_enrolled": review_enrolled,
+        "total": int(total or 0),
+        "mastered": int(mastered or 0),
+        "added_last_7_days": int(last_week or 0),
+        "review_enrolled": int(review_enrolled),
         "by_word_level": by_level,
         "by_cefr_level": by_cefr,
         "by_source": by_source,
@@ -392,21 +508,148 @@ def list_tags(db: Session, *, user_id: int) -> List[Dict[str, Any]]:
 
 
 def review_stats(db: Session, *, user_id: int) -> Dict[str, Any]:
-    total = db.query(ReviewItem).filter_by(user_id=user_id).count()
     now = _utcnow()
-    due = db.query(ReviewItem).filter(
-        ReviewItem.user_id == user_id, ReviewItem.due_at <= now
-    ).count()
+    total, due = db.query(
+        func.count(ReviewItem.id),
+        func.coalesce(func.sum(case((ReviewItem.due_at <= now, 1), else_=0)), 0),
+    ).filter(ReviewItem.user_id == user_id).one()
+
     by_box: Dict[int, int] = {b: 0 for b in _BOX_INTERVAL_DAYS}
-    for item in db.query(ReviewItem).filter_by(user_id=user_id).all():
-        by_box[int(item.box or 0)] = by_box.get(int(item.box or 0), 0) + 1
-    library_total = db.query(LibraryWord).filter_by(user_id=user_id).count()
+    for box, cnt in db.query(ReviewItem.box, func.count(ReviewItem.id))\
+            .filter(ReviewItem.user_id == user_id)\
+            .group_by(ReviewItem.box)\
+            .all():
+        by_box[int(box or 0)] = int(cnt or 0)
+
+    library_total = db.query(func.count(LibraryWord.id))\
+        .filter(LibraryWord.user_id == user_id).scalar() or 0
     return {
-        "library_total": library_total,
-        "review_total": total,
-        "review_due": due,
+        "library_total": int(library_total),
+        "review_total": int(total or 0),
+        "review_due": int(due or 0),
         "by_box": by_box,
         "box_intervals_days": _BOX_INTERVAL_DAYS,
+    }
+
+
+# ── Review analytics: heatmap + streak ────────────────────────────────────────
+
+def review_heatmap(
+    db: Session, *, user_id: int, days: int = 30,
+) -> Dict[str, Any]:
+    """Return per-day review activity for the last `days` days.
+
+    Output schema:
+      {
+        "days": <int>,
+        "start": "YYYY-MM-DD",
+        "end":   "YYYY-MM-DD",
+        "buckets": [ { "date": "YYYY-MM-DD",
+                       "total": int, "remembered": int, "fuzzy": int, "forgot": int }, ... ]
+      }
+
+    Buckets are aligned to UTC date boundaries. Empty days are included so the
+    heatmap component can render a contiguous calendar.
+    """
+    days = max(1, min(days, 365))
+    today = date.today()
+    start_date = today - timedelta(days=days - 1)
+    cutoff = datetime.combine(start_date, datetime.min.time())
+
+    day_expr = func.date(ReviewEvent.created_at)
+    rows = (
+        db.query(
+            day_expr.label("day"),
+            ReviewEvent.quality,
+            func.count(ReviewEvent.id),
+        )
+        .filter(ReviewEvent.user_id == user_id, ReviewEvent.created_at >= cutoff)
+        .group_by(day_expr, ReviewEvent.quality)
+        .all()
+    )
+
+    bucket_map: Dict[str, Dict[str, int]] = {}
+    for raw_day, quality, count in rows:
+        # SQLite returns date() as ISO string; Postgres as date object — normalise.
+        key = raw_day if isinstance(raw_day, str) else raw_day.isoformat()
+        slot = bucket_map.setdefault(key, {"total": 0, "remembered": 0, "fuzzy": 0, "forgot": 0})
+        slot["total"] += int(count or 0)
+        if quality in slot:
+            slot[quality] += int(count or 0)
+
+    buckets: List[Dict[str, Any]] = []
+    for offset_days in range(days):
+        d = start_date + timedelta(days=offset_days)
+        key = d.isoformat()
+        info = bucket_map.get(key) or {"total": 0, "remembered": 0, "fuzzy": 0, "forgot": 0}
+        buckets.append({"date": key, **info})
+
+    return {
+        "days": days,
+        "start": start_date.isoformat(),
+        "end": today.isoformat(),
+        "buckets": buckets,
+    }
+
+
+def review_streak(db: Session, *, user_id: int) -> Dict[str, Any]:
+    """Daily-review streak (consecutive UTC days with ≥1 review event).
+
+    Returns current_streak (counting today/yesterday-anchored runs), longest_streak,
+    last_review_date, and reviewed_today flag.
+    """
+    rows = (
+        db.query(func.date(ReviewEvent.created_at))
+        .filter(ReviewEvent.user_id == user_id)
+        .group_by(func.date(ReviewEvent.created_at))
+        .all()
+    )
+    raw_days: List[date] = []
+    for (raw,) in rows:
+        if raw is None:
+            continue
+        if isinstance(raw, str):
+            try:
+                raw_days.append(date.fromisoformat(raw))
+            except ValueError:
+                continue
+        elif isinstance(raw, datetime):
+            raw_days.append(raw.date())
+        else:
+            raw_days.append(raw)  # type: ignore[arg-type]
+    raw_days.sort()
+
+    if not raw_days:
+        return {
+            "current_streak": 0, "longest_streak": 0,
+            "last_review_date": None, "reviewed_today": False,
+        }
+
+    longest = run = 1
+    for i in range(1, len(raw_days)):
+        if (raw_days[i] - raw_days[i - 1]).days == 1:
+            run += 1
+            longest = max(longest, run)
+        elif raw_days[i] != raw_days[i - 1]:
+            run = 1
+
+    today = date.today()
+    reviewed_today = raw_days[-1] == today
+    # Current streak counts only if the last review was today or yesterday —
+    # otherwise it's already broken.
+    current = 0
+    if (today - raw_days[-1]).days <= 1:
+        current = 1
+        for i in range(len(raw_days) - 1, 0, -1):
+            if (raw_days[i] - raw_days[i - 1]).days == 1:
+                current += 1
+            else:
+                break
+    return {
+        "current_streak": current,
+        "longest_streak": longest,
+        "last_review_date": raw_days[-1].isoformat(),
+        "reviewed_today": reviewed_today,
     }
 
 
@@ -435,6 +678,7 @@ def _row_to_dict(row: Optional[LibraryWord]) -> Optional[Dict[str, Any]]:
         "word_level": row.word_level,
         "cefr_level": row.cefr_level,
         "zipf_score": float(row.zipf_score) if row.zipf_score else None,
+        "mastered": bool(row.mastered),
         "created_at": row.created_at.isoformat() if row.created_at else None,
         "updated_at": row.updated_at.isoformat() if row.updated_at else None,
     }

@@ -191,6 +191,22 @@ class LibraryUpdateRequest(BaseModel):
     example_sentence: Optional[str] = None
     notes: Optional[str] = None
     tags: Optional[str] = None
+    mastered: Optional[bool] = None
+
+
+class LibraryBulkDeleteRequest(BaseModel):
+    word_ids: List[int] = Field(..., min_length=1, max_length=1000)
+
+
+class LibraryBulkMasterRequest(BaseModel):
+    word_ids: List[int] = Field(..., min_length=1, max_length=1000)
+    mastered: bool = True
+
+
+class LibraryBulkTagRequest(BaseModel):
+    word_ids: List[int] = Field(..., min_length=1, max_length=1000)
+    add: Optional[List[str]] = None
+    remove: Optional[List[str]] = None
 
 
 # ── Spaced repetition review ─────────────────────────────────────────────────

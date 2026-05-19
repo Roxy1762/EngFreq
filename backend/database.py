@@ -10,6 +10,7 @@ from sqlalchemy import (
     Column,
     DateTime,
     ForeignKey,
+    Index,
     Integer,
     String,
     Text,
@@ -125,8 +126,18 @@ class LibraryWord(Base):
     word_level = Column(String(16), nullable=True)
     cefr_level = Column(String(8), nullable=True)
     zipf_score = Column(String(8), nullable=True)        # stored as text to avoid float precision issues
+    # User-managed "I've fully learned this" flag. Separate from review box so users can
+    # archive a word from the active queue without losing the saved definition.
+    mastered = Column(Boolean, nullable=False, default=False)
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
     updated_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
+
+    __table_args__ = (
+        # Dedup lookup by (user, headword) hits a unique-ish path on every save;
+        # this composite index turns it into a single B-tree probe.
+        Index("ix_library_words_user_headword", "user_id", "headword"),
+        Index("ix_library_words_user_created", "user_id", "created_at"),
+    )
 
 
 class ReviewItem(Base):
@@ -144,6 +155,32 @@ class ReviewItem(Base):
     due_at = Column(DateTime, nullable=False, default=lambda: datetime.now(timezone.utc), index=True)
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
     updated_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
+
+    __table_args__ = (
+        # Queue query: due items for one user, oldest first.
+        Index("ix_review_items_user_due", "user_id", "due_at"),
+    )
+
+
+class ReviewEvent(Base):
+    """Append-only log of every review grading.
+
+    Powers heatmap, daily-streak, and longer-term retention analytics that the
+    point-in-time `ReviewItem` row can't answer (it only stores the latest box).
+    """
+    __tablename__ = "review_events"
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
+    headword = Column(String(64), nullable=False)
+    quality = Column(String(16), nullable=False)            # remembered | fuzzy | forgot
+    box_before = Column(Integer, nullable=False, default=0)
+    box_after = Column(Integer, nullable=False, default=0)
+    created_at = Column(DateTime, nullable=False, default=lambda: datetime.now(timezone.utc), index=True)
+
+    __table_args__ = (
+        Index("ix_review_events_user_created", "user_id", "created_at"),
+    )
 
 
 def get_db():
@@ -177,6 +214,11 @@ def _ensure_schema_columns() -> None:
         _add_col_if_missing(conn, "users", user_cols, "email", "TEXT")
         _add_col_if_missing(conn, "users", user_cols, "display_name", "TEXT")
         _add_col_if_missing(conn, "users", user_cols, "preferred_provider", "TEXT")
+
+        # --- library_words table: new "mastered" flag for archiving learnt entries ---
+        lib_cols = {row[1] for row in conn.execute("PRAGMA table_info(library_words)").fetchall()}
+        if lib_cols:  # table exists
+            _add_col_if_missing(conn, "library_words", lib_cols, "mastered", "INTEGER NOT NULL DEFAULT 0")
 
         conn.commit()
     finally:
