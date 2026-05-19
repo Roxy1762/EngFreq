@@ -140,19 +140,30 @@ _ensure_admin()
 # ── Lifespan (replaces deprecated @app.on_event) ─────────────────────────────
 @asynccontextmanager
 async def _lifespan(app: FastAPI):
-    yield
-    # Graceful shutdown: drop in-memory task state and cancel lingering tasks.
-    size = _task_store.size()
-    if size:
-        logger.info("Shutdown: clearing %d in-flight task(s) from memory", size)
-    for task_id in list(_task_store.active_task_ids()):
-        _task_store.purge(task_id)
+    # Start the background backup scheduler. It self-disables when the admin
+    # hasn't enabled it yet, so it's safe to always boot.
+    from backend.services import backup_scheduler
+    backup_scheduler.start_scheduler()
+    try:
+        yield
+    finally:
+        try:
+            await backup_scheduler.stop_scheduler()
+        except Exception:   # noqa: BLE001
+            logger.exception("Backup scheduler shutdown failed")
 
-    pending = [t for t in asyncio.all_tasks() if not t.done()]
-    for task in pending:
-        task.cancel()
-    if pending:
-        await asyncio.gather(*pending, return_exceptions=True)
+        # Graceful shutdown: drop in-memory task state and cancel lingering tasks.
+        size = _task_store.size()
+        if size:
+            logger.info("Shutdown: clearing %d in-flight task(s) from memory", size)
+        for task_id in list(_task_store.active_task_ids()):
+            _task_store.purge(task_id)
+
+        pending = [t for t in asyncio.all_tasks() if not t.done()]
+        for task in pending:
+            task.cancel()
+        if pending:
+            await asyncio.gather(*pending, return_exceptions=True)
 
 
 # ── FastAPI app ───────────────────────────────────────────────────────────────
@@ -2218,6 +2229,7 @@ async def admin_migration_export(
     include_file_store: bool = Query(True, description="Include data/files/"),
     include_wordlists: bool = Query(True, description="Include data/wordlists/"),
     include_ocr_cache: bool = Query(False, description="Include data/ocr_cache/ (large)"),
+    compression: str = Query("balanced", description="store|fast|balanced|best"),
     notes: str = Query("", description="Free-form note stored in manifest"),
     admin: User = Depends(get_admin_user),
 ):
@@ -2228,10 +2240,13 @@ async def admin_migration_export(
     """
     from backend.services import migration_service
 
+    if compression not in migration_service.COMPRESSION_PRESETS:
+        raise HTTPException(400, f"未知压缩级别: {compression}")
     opts = migration_service.ExportOptions(
         include_file_store=include_file_store,
         include_wordlists=include_wordlists,
         include_ocr_cache=include_ocr_cache,
+        compression=compression,
         notes=notes[:500],
     )
     try:
@@ -2252,8 +2267,32 @@ async def admin_migration_export(
         headers={
             "X-Migration-Schema-Version": str(manifest.schema_version),
             "X-Migration-App-Version": manifest.app_version,
+            "X-Migration-Compression": manifest.compression,
         },
     )
+
+
+async def _stream_upload_to_disk(file: UploadFile, prefix: str) -> Path:
+    """Write an upload to a tempfile in fixed-size chunks.
+
+    Returns the staged path. Callers are responsible for unlinking it. Used by
+    both ``/preview`` and ``/import`` to avoid loading multi-GB bundles into RAM.
+    """
+    import tempfile as _tempfile
+    suffix = Path(file.filename or "bundle.zip").suffix.lower() or ".zip"
+    with _tempfile.NamedTemporaryFile(prefix=prefix, suffix=suffix, delete=False) as tmp:
+        tmp_path = Path(tmp.name)
+    try:
+        with tmp_path.open("wb") as sink:
+            while True:
+                chunk = await file.read(8 * 1024 * 1024)
+                if not chunk:
+                    break
+                sink.write(chunk)
+        return tmp_path
+    except Exception:
+        tmp_path.unlink(missing_ok=True)
+        raise
 
 
 @app.post("/admin/migration/preview")
@@ -2264,14 +2303,9 @@ async def admin_migration_preview(
     """Inspect a bundle's manifest without applying any changes."""
     from backend.services import migration_service
 
-    import tempfile as _tempfile
-    suffix = Path(file.filename or "bundle.zip").suffix.lower() or ".zip"
-    with _tempfile.NamedTemporaryFile(prefix="engfreq-preview-", suffix=suffix, delete=False) as tmp:
-        tmp_path = Path(tmp.name)
+    tmp_path = await _stream_upload_to_disk(file, "engfreq-preview-")
     try:
-        data = await file.read()
-        tmp_path.write_bytes(data)
-        return migration_service.preview_bundle(tmp_path)
+        return await asyncio.to_thread(migration_service.preview_bundle, tmp_path)
     except Exception as exc:   # noqa: BLE001
         raise HTTPException(400, f"无法读取迁移包: {exc}") from exc
     finally:
@@ -2287,12 +2321,13 @@ async def admin_migration_import(
     dry_run: bool = Form(False),
     make_safety_backup: bool = Form(True),
     abort_on_user_conflict: bool = Form(False),
+    verify_all_checksums: bool = Form(True),
     admin: User = Depends(get_admin_user),
 ):
     """Apply a migration bundle.
 
     By default the import:
-      * verifies the bundle's manifest + DB checksum,
+      * verifies the bundle's manifest + every member's SHA256 checksum,
       * writes a safety snapshot of the *current* state to ``data/migration_backups/``,
       * replaces the live SQLite DB,
       * merges file_store / wordlists (use ``replace_*=true`` to overwrite),
@@ -2302,19 +2337,8 @@ async def admin_migration_import(
     """
     from backend.services import migration_service
 
-    import tempfile as _tempfile
-    suffix = Path(file.filename or "bundle.zip").suffix.lower() or ".zip"
-    with _tempfile.NamedTemporaryFile(prefix="engfreq-import-", suffix=suffix, delete=False) as tmp:
-        tmp_path = Path(tmp.name)
+    tmp_path = await _stream_upload_to_disk(file, "engfreq-import-")
     try:
-        # Read in chunks to avoid loading huge bundles fully into memory.
-        with tmp_path.open("wb") as sink:
-            while True:
-                chunk = await file.read(8 * 1024 * 1024)
-                if not chunk:
-                    break
-                sink.write(chunk)
-
         opts = migration_service.ImportOptions(
             replace_file_store=replace_file_store,
             replace_wordlists=replace_wordlists,
@@ -2322,6 +2346,7 @@ async def admin_migration_import(
             dry_run=dry_run,
             make_safety_backup=make_safety_backup,
             abort_on_user_conflict=abort_on_user_conflict,
+            verify_all_checksums=verify_all_checksums,
         )
         report = await migration_service.import_snapshot(tmp_path, opts)
         if not report.ok:
@@ -2340,22 +2365,9 @@ async def admin_migration_import(
 
 @app.get("/admin/migration/backups")
 async def admin_migration_list_backups(admin: User = Depends(get_admin_user)):
-    """List safety-backup zips written by previous imports."""
-    from backend.services.migration_service import BACKUP_DIR
-    if not BACKUP_DIR.exists():
-        return {"backups": []}
-    entries = []
-    for p in sorted(BACKUP_DIR.glob("*.zip"), reverse=True):
-        try:
-            st = p.stat()
-            entries.append({
-                "name": p.name,
-                "size_bytes": st.st_size,
-                "modified_at": iso_z(datetime.fromtimestamp(st.st_mtime, tz=timezone.utc)),
-            })
-        except OSError:
-            continue
-    return {"backups": entries}
+    """List backup zips (auto-scheduled, pre-import safety, manual) with category."""
+    from backend.services import migration_service
+    return {"backups": migration_service.list_backups()}
 
 
 @app.get("/admin/migration/backups/{name}")
@@ -2363,10 +2375,9 @@ async def admin_migration_download_backup(
     name: str,
     admin: User = Depends(get_admin_user),
 ):
-    """Download a previously written safety backup."""
-    from backend.services.migration_service import BACKUP_DIR
-    # Defense-in-depth: only allow simple filenames in the backup dir
-    if "/" in name or "\\" in name or name.startswith(".") or not name.endswith(".zip"):
+    """Download a previously written backup."""
+    from backend.services.migration_service import BACKUP_DIR, _is_safe_backup_name
+    if not _is_safe_backup_name(name):
         raise HTTPException(400, "非法的备份文件名")
     target = (BACKUP_DIR / name).resolve()
     if BACKUP_DIR.resolve() not in target.parents or not target.exists():
@@ -2383,15 +2394,113 @@ async def admin_migration_delete_backup(
     name: str,
     admin: User = Depends(get_admin_user),
 ):
-    """Delete a safety backup."""
-    from backend.services.migration_service import BACKUP_DIR
-    if "/" in name or "\\" in name or name.startswith(".") or not name.endswith(".zip"):
+    """Delete a backup file."""
+    from backend.services.migration_service import BACKUP_DIR, _is_safe_backup_name
+    if not _is_safe_backup_name(name):
         raise HTTPException(400, "非法的备份文件名")
     target = (BACKUP_DIR / name).resolve()
     if BACKUP_DIR.resolve() not in target.parents or not target.exists():
         raise HTTPException(404, "备份文件不存在")
     target.unlink(missing_ok=True)
     return {"ok": True, "deleted": name}
+
+
+@app.post("/admin/migration/backups/{name}/restore")
+async def admin_migration_restore_from_backup(
+    name: str,
+    replace_file_store: bool = Form(False),
+    replace_wordlists: bool = Form(False),
+    replace_ocr_cache: bool = Form(False),
+    dry_run: bool = Form(False),
+    make_safety_backup: bool = Form(True),
+    abort_on_user_conflict: bool = Form(False),
+    verify_all_checksums: bool = Form(True),
+    admin: User = Depends(get_admin_user),
+):
+    """Roll back to a backup stored on the server without re-uploading it.
+
+    Saves a network roundtrip for large bundles (typical safety snapshots are
+    multi-hundred-MB).
+    """
+    from backend.services import migration_service
+
+    opts = migration_service.ImportOptions(
+        replace_file_store=replace_file_store,
+        replace_wordlists=replace_wordlists,
+        replace_ocr_cache=replace_ocr_cache,
+        dry_run=dry_run,
+        make_safety_backup=make_safety_backup,
+        abort_on_user_conflict=abort_on_user_conflict,
+        verify_all_checksums=verify_all_checksums,
+    )
+    try:
+        report = await migration_service.restore_from_backup_file(name, opts)
+    except (FileNotFoundError, ValueError) as exc:
+        raise HTTPException(404 if isinstance(exc, FileNotFoundError) else 400, str(exc)) from exc
+    if not report.ok:
+        raise HTTPException(400, report.error or "还原失败")
+    return {
+        "ok": True,
+        "dry_run": dry_run,
+        "source_backup": name,
+        "manifest": report.manifest,
+        "actions": report.actions,
+        "warnings": report.warnings,
+        "safety_backup_path": report.safety_backup_path,
+    }
+
+
+# ── Admin: scheduled automatic backups ───────────────────────────────────────
+
+@app.get("/admin/migration/schedule")
+async def admin_migration_get_schedule(admin: User = Depends(get_admin_user)):
+    """Current schedule config + last-run status."""
+    from backend.services import backup_scheduler
+    return backup_scheduler.serialize_schedule_view()
+
+
+class _BackupScheduleUpdate(BaseModel):
+    enabled: Optional[bool] = None
+    interval_hours: Optional[int] = None
+    retention_count: Optional[int] = None
+    include_file_store: Optional[bool] = None
+    include_wordlists: Optional[bool] = None
+    include_ocr_cache: Optional[bool] = None
+    compression: Optional[str] = None
+    notes_prefix: Optional[str] = None
+
+
+@app.put("/admin/migration/schedule")
+async def admin_migration_update_schedule(
+    payload: _BackupScheduleUpdate,
+    admin: User = Depends(get_admin_user),
+):
+    """Update the schedule. Returns the merged schedule + recomputed status."""
+    from backend.services import backup_scheduler, migration_service
+
+    data = payload.model_dump(exclude_none=True)
+    if "compression" in data and data["compression"] not in migration_service.COMPRESSION_PRESETS:
+        raise HTTPException(400, f"未知压缩级别: {data['compression']}")
+    try:
+        await asyncio.to_thread(backup_scheduler.save_schedule, data)
+    except Exception as exc:   # noqa: BLE001
+        raise HTTPException(400, f"无法保存计划: {exc}") from exc
+    return backup_scheduler.serialize_schedule_view()
+
+
+@app.post("/admin/migration/schedule/run-now")
+async def admin_migration_run_backup_now(
+    notes: str = Form(""),
+    admin: User = Depends(get_admin_user),
+):
+    """Trigger an immediate auto-backup, ignoring the schedule timer."""
+    from backend.services import backup_scheduler
+    status = await backup_scheduler.trigger_run_now(notes=notes[:200])
+    return {
+        "ok": status.last_status == "success",
+        "status": status.__dict__ if hasattr(status, "__dict__") else status,
+        "view": backup_scheduler.serialize_schedule_view(),
+    }
 
 
 # ── Admin panel SPA ───────────────────────────────────────────────────────────
