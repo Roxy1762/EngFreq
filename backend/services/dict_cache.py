@@ -401,3 +401,28 @@ def memory_stats() -> Dict[str, Any]:
             "negative_size": len(_negative_cache),
             "negative_capacity": _NEGATIVE_CACHE_SIZE,
         }
+
+
+def prune_expired() -> Dict[str, int]:
+    """Evict expired entries from both in-memory layers.
+
+    The OrderedDict-based caches only check TTL on read; stale entries that
+    nobody asks about pile up until the size cap evicts them. In a long-lived
+    server that's harmless for the positive cache (caps at 2048) but bad for
+    the negative cache, which silently keeps 4096 dead-API entries for months.
+    Call this periodically (every few hours) to keep the negative cache hot
+    with genuinely "recent" misses.
+    """
+    now = time.time()
+    dropped_neg = 0
+    dropped_pos = 0
+    with _memory_lock:
+        for key, ts in list(_negative_cache.items()):
+            if now - ts > _NEGATIVE_TTL_SECONDS:
+                _negative_cache.pop(key, None)
+                dropped_neg += 1
+        for key, (stored_at, _) in list(_memory_cache.items()):
+            if now - stored_at > _DEFAULT_TTL_SECONDS:
+                _memory_cache.pop(key, None)
+                dropped_pos += 1
+    return {"negative_dropped": dropped_neg, "positive_dropped": dropped_pos}

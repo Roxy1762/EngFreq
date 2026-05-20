@@ -18,6 +18,7 @@ Design notes:
 from __future__ import annotations
 
 import re
+from functools import lru_cache
 from typing import Optional
 
 # Derivational suffixes, ordered longest-first so we strip the most specific one.
@@ -79,10 +80,16 @@ _PREFIX_NORMALISE = {
 }
 
 
+@lru_cache(maxsize=32768)
 def get_family_id(lemma: str) -> Optional[str]:
     """
     Return an approximate word-family root for *lemma*.
     Returns None for very short words where grouping would be meaningless.
+
+    Memoised because frequency_analyzer calls this once per token (post-filter)
+    — a typical exam has 1000–5000 tokens but only 300–800 unique lemmas, so
+    LRU caching collapses the work by 5–10×. Cache survives across requests
+    because the function is pure.
     """
     if not lemma or len(lemma) <= 2:
         return None

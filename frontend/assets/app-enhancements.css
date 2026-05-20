@@ -1,3 +1,94 @@
+/* ─── Layered theme tokens ─────────────────────────────────────────────────
+ * Index/manage HTML each declare a flat :root palette inline. We extend that
+ * palette here with surface/elevation tokens so cards, chips, and badges share
+ * the same scale across both pages. Re-using the existing variable names keeps
+ * legacy markup working untouched.
+ */
+:root {
+  --surface-1: #ffffff;
+  --surface-2: #f8fafc;
+  --surface-3: #f1f5f9;
+  --on-surface: var(--text);
+  --on-surface-muted: var(--muted);
+  --accent-soft: #eff6ff;
+  --warn-soft: #fffbeb;
+  --warn-strong: #c2410c;
+  --success-soft: #ecfdf5;
+  --danger-soft: #fef2f2;
+  --shadow-1: 0 1px 2px rgba(15, 23, 42, 0.05);
+  --shadow-2: 0 4px 14px rgba(15, 23, 42, 0.08);
+  --focus-ring: 0 0 0 3px rgba(37, 99, 235, 0.35);
+  --transition-fast: 120ms cubic-bezier(0.4, 0, 0.2, 1);
+  --transition-mid: 240ms cubic-bezier(0.4, 0, 0.2, 1);
+  color-scheme: light;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --primary:        #60a5fa;
+    --primary-dk:     #3b82f6;
+    --success:        #34d399;
+    --warn:           #fbbf24;
+    --danger:         #f87171;
+    --bg:             #0f172a;
+    --card:           #1e293b;
+    --border:         #334155;
+    --text:           #e2e8f0;
+    --muted:          #94a3b8;
+    --surface-1:      #1e293b;
+    --surface-2:      #1a2335;
+    --surface-3:      #243047;
+    --accent-soft:    #1e3a8a;
+    --warn-soft:      #422006;
+    --warn-strong:    #fdba74;
+    --success-soft:   #064e3b;
+    --danger-soft:    #450a0a;
+    --shadow-1: 0 1px 2px rgba(0, 0, 0, 0.45);
+    --shadow-2: 0 6px 20px rgba(0, 0, 0, 0.55);
+    --focus-ring: 0 0 0 3px rgba(96, 165, 250, 0.45);
+    color-scheme: dark;
+  }
+  thead th { background: var(--surface-3) !important; }
+  tbody tr:nth-child(even) { background: rgba(255, 255, 255, 0.02) !important; }
+  .vocab-card { background: var(--surface-1) !important; }
+  .counts .c-badge { background: var(--surface-3) !important; }
+  #drop-zone:hover, #drop-zone.drag-over { background: var(--accent-soft) !important; }
+  .code-box { background: var(--surface-3) !important; }
+  .stat-card,
+  .summary-card,
+  .settings-card,
+  #multi-exam-list .exam-check-item:hover { background: var(--surface-2) !important; }
+  .vocab-toolbar,
+  .vocab-card .note { background: var(--surface-2) !important; color: var(--warn-strong) !important; }
+  .level-基础   { background: var(--success-soft); color: #6ee7b7; }
+  .level-高考   { background: var(--accent-soft); color: #93c5fd; }
+  .level-四六级 { background: #422006; color: #fde68a; }
+  .level-超纲   { background: var(--danger-soft); color: #fca5a5; }
+  .auth-error,
+  .error-box { background: var(--danger-soft); color: #fca5a5; border-color: rgba(248, 113, 113, 0.4); }
+}
+
+/* ─── Focus visibility (accessibility) ──────────────────────────────────── */
+:where(button, a, input, select, textarea, [tabindex]):focus { outline: none; }
+:where(button, a, input, select, textarea, [tabindex]):focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+  border-radius: 6px;
+}
+
+/* ─── Reduced motion ─────────────────────────────────────────────────────── */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+/* ─── Original utility classes (preserved) ──────────────────────────────── */
 .enhanced-note {
   margin-top: 0.45rem;
   font-size: 0.78rem;
@@ -20,8 +111,17 @@
   padding: 0.42rem 0.6rem;
   border: 1px solid var(--border);
   border-radius: 6px;
-  background: #fff;
+  background: var(--surface-1);
+  color: var(--text);
   font-size: 0.85rem;
+  transition: border-color var(--transition-fast), box-shadow var(--transition-fast);
+}
+
+.sort-order-select:hover,
+.vocab-sort-select:hover,
+.settings-input:hover,
+.settings-select:hover {
+  border-color: var(--primary);
 }
 
 .vocab-toolbar {
@@ -30,6 +130,17 @@
   align-items: center;
   flex-wrap: wrap;
   margin-bottom: 0.85rem;
+}
+
+.vocab-card {
+  /* contain isolates layout/style work to each card so scroll/resize doesn't
+     thrash the whole grid. Real win on 100+ card lists. */
+  contain: layout style;
+  transition: transform var(--transition-fast), box-shadow var(--transition-fast);
+}
+
+.vocab-card:hover {
+  transform: translateY(-1px);
 }
 
 .vocab-card-top {
@@ -47,17 +158,23 @@
 
 .vocab-delete-btn {
   border: 1px solid #fecaca;
-  background: #fff1f2;
+  background: var(--danger-soft);
   color: #b91c1c;
   border-radius: 6px;
   padding: 0.25rem 0.55rem;
   cursor: pointer;
   font-size: 0.76rem;
   font-weight: 700;
+  transition: background var(--transition-fast);
 }
 
 .vocab-delete-btn:hover {
   background: #ffe4e6;
+}
+
+@media (prefers-color-scheme: dark) {
+  .vocab-delete-btn { border-color: rgba(248, 113, 113, 0.4); color: #fca5a5; }
+  .vocab-delete-btn:hover { background: rgba(248, 113, 113, 0.18); }
 }
 
 .admin-summary {
@@ -70,8 +187,14 @@
 .summary-card {
   border: 1px solid var(--border);
   border-radius: 10px;
-  background: #f8fafc;
+  background: var(--surface-2);
   padding: 0.85rem 1rem;
+  transition: transform var(--transition-fast), box-shadow var(--transition-fast);
+}
+
+.summary-card:hover {
+  transform: translateY(-1px);
+  box-shadow: var(--shadow-1);
 }
 
 .summary-card .label {
@@ -98,7 +221,7 @@
   border: 1px solid var(--border);
   border-radius: 12px;
   padding: 1rem;
-  background: #f8fafc;
+  background: var(--surface-2);
 }
 
 .settings-card h3 {
@@ -139,8 +262,8 @@
   align-items: center;
   padding: 0.2rem 0.55rem;
   border-radius: 999px;
-  background: #e2e8f0;
-  color: #334155;
+  background: var(--surface-3);
+  color: var(--text);
   font-size: 0.74rem;
   font-weight: 700;
   margin-right: 0.35rem;
@@ -148,13 +271,18 @@
 }
 
 .mini-chip.ok {
-  background: #dcfce7;
+  background: var(--success-soft);
   color: #166534;
 }
 
 .mini-chip.warn {
   background: #fef3c7;
   color: #92400e;
+}
+
+@media (prefers-color-scheme: dark) {
+  .mini-chip.ok { color: #6ee7b7; }
+  .mini-chip.warn { background: #422006; color: #fde68a; }
 }
 
 .admin-actions,
@@ -177,6 +305,128 @@
   margin-top: 0.2rem;
 }
 
+/* ─── Virtualised table viewport ───────────────────────────────────────────
+ * The viewport gets a fixed height + scroll; we render only the rows visible
+ * to the user (plus a small over-render buffer). Padding rows above and below
+ * stand in for the off-screen rows so the scrollbar still maps to the full
+ * dataset size.
+ */
+.tbl-virtual {
+  max-height: 60vh;
+  overflow-y: auto;
+  overflow-x: auto;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  contain: strict;
+  scroll-behavior: smooth;
+}
+.tbl-virtual table { width: 100%; }
+.tbl-virtual thead th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background: var(--surface-3);
+}
+.tbl-virtual .vr-spacer-top,
+.tbl-virtual .vr-spacer-bot {
+  border: 0;
+  padding: 0;
+}
+.tbl-virtual .vr-spacer-top > td,
+.tbl-virtual .vr-spacer-bot > td {
+  padding: 0;
+  border: 0;
+  background: transparent;
+}
+
+.tbl-meta {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  font-size: 0.78rem;
+  color: var(--muted);
+  margin-top: 0.4rem;
+  flex-wrap: wrap;
+}
+.tbl-meta .count-pill {
+  background: var(--accent-soft);
+  color: var(--primary-dk);
+  border-radius: 999px;
+  padding: 0.12rem 0.6rem;
+  font-weight: 700;
+}
+.tbl-meta .count-pill.warn {
+  background: #fef3c7;
+  color: #92400e;
+}
+
+/* ─── Vocab grid pagination ────────────────────────────────────────────── */
+.vocab-grid {
+  /* Bigger min so cards don't get cramped under 1100px containers but stay
+     responsive. Container-query-friendly. */
+  grid-template-columns: repeat(auto-fill, minmax(min(100%, 280px), 1fr));
+}
+.vocab-pager {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.5rem;
+  margin: 1rem 0 0.25rem;
+  flex-wrap: wrap;
+}
+.vocab-pager button {
+  padding: 0.4rem 0.95rem;
+  border-radius: 8px;
+  border: 1.5px solid var(--border);
+  background: var(--surface-1);
+  color: var(--text);
+  font-size: 0.85rem;
+  font-weight: 700;
+  cursor: pointer;
+  transition: background var(--transition-fast), color var(--transition-fast), border-color var(--transition-fast);
+}
+.vocab-pager button:hover:not(:disabled) {
+  background: var(--primary);
+  color: #fff;
+  border-color: var(--primary);
+}
+.vocab-pager button:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+.vocab-pager .vp-info {
+  font-size: 0.82rem;
+  color: var(--muted);
+  font-weight: 600;
+}
+
+/* ─── Skeleton (loading) shimmer ──────────────────────────────────────── */
+@keyframes shimmer {
+  0%   { background-position: -250px 0; }
+  100% { background-position: 250px 0; }
+}
+.skeleton {
+  display: inline-block;
+  background: linear-gradient(90deg, var(--surface-2) 0%, var(--surface-3) 50%, var(--surface-2) 100%);
+  background-size: 500px 100%;
+  animation: shimmer 1.4s linear infinite;
+  border-radius: 4px;
+  min-height: 0.8em;
+  min-width: 4ch;
+  opacity: 0.8;
+}
+
+/* ─── Table cell utility colour classes (replace inline styles) ──────── */
+.cell-option { color: var(--warn); font-weight: 700; }
+.cell-score  { color: var(--primary); font-weight: 700; }
+.badge-option { background: #ffedd5; color: var(--warn-strong); }
+.badge-score  { background: var(--accent-soft); color: var(--primary-dk); }
+@media (prefers-color-scheme: dark) {
+  .badge-option { background: #422006; color: #fdba74; }
+  .badge-score  { background: #1e3a8a; color: #93c5fd; }
+}
+
+/* ─── Responsive tweaks ─────────────────────────────────────────────────── */
 @media (max-width: 720px) {
   .vocab-card-top {
     flex-direction: column;
@@ -186,4 +436,6 @@
   .settings-grid {
     grid-template-columns: 1fr;
   }
+
+  .tbl-virtual { max-height: 70vh; }
 }
