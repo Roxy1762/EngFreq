@@ -83,11 +83,19 @@ class YoudaoProvider(BaseVocabProvider):
         }
 
         try:
-            resp = await client.post(_YOUDAO_API_URL, data=params)
+            # Explicit per-call timeout — httpx's client-level timeout is only
+            # applied to certain phases and recent versions changed defaults.
+            resp = await client.post(_YOUDAO_API_URL, data=params, timeout=8.0)
             resp.raise_for_status()
-            data = resp.json()
         except Exception as exc:
             logger.warning("Youdao API error for '%s': %s", word, exc)
+            return None
+
+        try:
+            data = resp.json()
+        except ValueError as exc:
+            # Youdao occasionally serves an HTML error page when rate-limited.
+            logger.warning("Youdao non-JSON response for '%s': %s", word, exc)
             return None
 
         error_code = data.get("errorCode", "0")

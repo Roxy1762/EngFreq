@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from typing import List, Optional
 
 import httpx
@@ -22,6 +23,7 @@ import httpx
 from backend.models.schemas import LemmaEntry, VocabEntry
 from backend.providers.base_provider import BaseVocabProvider
 from backend.services import dict_cache
+from backend.utils.metrics import record_provider_call
 
 logger = logging.getLogger(__name__)
 
@@ -79,16 +81,30 @@ class HttpDictProviderBase(BaseVocabProvider):
             if cached is not None:
                 return self._merge(entry, cached)
 
+        # Skip the API trip if we've recently determined this provider
+        # doesn't have this word. Decays after a short TTL so transient API
+        # failures don't poison future lookups.
+        if self.use_cache and dict_cache.is_known_miss(self.name, entry.lemma):
+            return self._stub(entry, reason=f"{self.name}_miss")
+
         async with sem:
+            t0 = time.monotonic()
             try:
                 cached = await self._lookup_one(client, entry.lemma)
+                latency = int((time.monotonic() - t0) * 1000)
             except Exception as exc:   # noqa: BLE001
+                latency = int((time.monotonic() - t0) * 1000)
                 logger.debug("%s lookup error for '%s': %s", self.name, entry.lemma, exc)
+                record_provider_call(self.name, ok=False, latency_ms=latency, error=str(exc)[:200])
                 return self._stub(entry, reason=f"{self.name}_error")
 
         if cached is None:
+            record_provider_call(self.name, ok=True, latency_ms=latency)
+            if self.use_cache:
+                dict_cache.mark_miss(self.name, entry.lemma)
             return self._stub(entry, reason=f"{self.name}_miss")
 
+        record_provider_call(self.name, ok=True, latency_ms=latency)
         if self.use_cache:
             dict_cache.put(self.name, entry.lemma, cached)
         return self._merge(entry, cached)

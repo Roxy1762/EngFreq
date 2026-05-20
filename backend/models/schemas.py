@@ -264,6 +264,44 @@ class QuizSubmitRequest(BaseModel):
     record_review_event: bool = True
 
 
+class CoachAskRequest(BaseModel):
+    """One-shot question to the AI coach (no persisted thread)."""
+    question: str = Field(..., min_length=1, max_length=2000)
+    focus_words: Optional[List[str]] = Field(default=None, max_length=20)
+    provider: Optional[str] = None
+    include_library_context: bool = True
+
+
+class CoachThreadCreate(BaseModel):
+    """Open a new persisted coach thread."""
+    title: Optional[str] = Field(None, max_length=120)
+    focus_words: Optional[List[str]] = Field(default=None, max_length=20)
+    provider: Optional[str] = None
+    initial_message: Optional[str] = Field(None, max_length=2000)
+
+
+class CoachMessagePost(BaseModel):
+    """Add a user message to an existing thread + get the assistant reply."""
+    content: str = Field(..., min_length=1, max_length=2000)
+    refresh_context: bool = False
+
+
+class CoachThreadUpdate(BaseModel):
+    title: Optional[str] = Field(None, max_length=120)
+    pinned: Optional[bool] = None
+    archived: Optional[bool] = None
+    focus_words: Optional[List[str]] = Field(default=None, max_length=20)
+
+
+class StudyPlanRefresh(BaseModel):
+    """Force-rebuild today's plan. All fields optional — sensible defaults
+    apply when missing."""
+    review_target: Optional[int] = Field(None, ge=0, le=100)
+    learn_target: Optional[int] = Field(None, ge=0, le=100)
+    quiz_target: Optional[int] = Field(None, ge=0, le=50)
+    include_quiz: bool = True
+
+
 class TaskStatus(BaseModel):
     task_id: str
     status: str           # pending | processing | done | error

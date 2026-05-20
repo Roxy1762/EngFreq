@@ -400,7 +400,10 @@ def generate_quiz(
 
     q = _eligible_library_query(db, user_id=user_id)
     if tag:
-        q = q.filter(LibraryWord.tags.like(f"%{tag.strip().lower()}%"))
+        # Escape LIKE wildcards: a tag of "20%" or "wild_card" should match
+        # literally, not as a wildcard pattern.
+        clean_tag = tag.strip().lower().replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        q = q.filter(LibraryWord.tags.like(f"%{clean_tag}%", escape="\\"))
 
     if only_due:
         # Two-step query: pull due headwords from ReviewItem first, then map

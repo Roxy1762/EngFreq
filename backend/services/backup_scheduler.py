@@ -93,8 +93,10 @@ def _get_run_lock() -> asyncio.Lock:
 # ── Persistence helpers ─────────────────────────────────────────────────────
 
 def _read_setting(key: str) -> dict[str, Any]:
-    db = SessionLocal()
-    try:
+    # Context manager form guarantees close-on-exception (a Pydantic
+    # validation crash between query and close would otherwise leak the
+    # session into the next caller's pool).
+    with SessionLocal() as db:
         rec = db.query(AppSetting).filter_by(key=key).first()
         if not rec or not rec.value_json:
             return {}
@@ -102,13 +104,10 @@ def _read_setting(key: str) -> dict[str, Any]:
             return json.loads(rec.value_json)
         except (json.JSONDecodeError, TypeError):
             return {}
-    finally:
-        db.close()
 
 
 def _write_setting(key: str, payload: dict[str, Any]) -> None:
-    db = SessionLocal()
-    try:
+    with SessionLocal() as db:
         rec = db.query(AppSetting).filter_by(key=key).first()
         body = json.dumps(payload, ensure_ascii=False)
         if rec is None:
@@ -116,8 +115,6 @@ def _write_setting(key: str, payload: dict[str, Any]) -> None:
         else:
             rec.value_json = body
         db.commit()
-    finally:
-        db.close()
 
 
 def get_schedule() -> BackupSchedule:

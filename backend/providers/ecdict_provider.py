@@ -13,8 +13,10 @@ No API key required. Fast lookups from local DB.
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 import sqlite3
+import threading
 from pathlib import Path
 from typing import List, Optional
 
@@ -98,6 +100,12 @@ def _get_ecdict_path() -> str:
 class ECDICTProvider(BaseVocabProvider):
     name = "ecdict"
 
+    # One read-only connection per thread. SQLite handles multiple readers
+    # fine; per-thread storage keeps us from contending on a single
+    # connection's serial cursor while still avoiding the connection
+    # open/close cost of the previous one-conn-per-word pattern.
+    _thread_local = threading.local()
+
     def __init__(self):
         raw_path = _get_ecdict_path()
         if not raw_path:
@@ -120,21 +128,49 @@ class ECDICTProvider(BaseVocabProvider):
         else:
             self._db_path = str(path)
 
-    def _lookup(self, word: str) -> Optional[dict]:
-        try:
-            conn = sqlite3.connect(self._db_path)
+    def _get_connection(self) -> sqlite3.Connection:
+        """Per-thread read-only connection, opened lazily."""
+        conn = getattr(self._thread_local, "conn", None)
+        if conn is None:
+            conn = sqlite3.connect(
+                self._db_path,
+                check_same_thread=False,
+                isolation_level=None,
+                timeout=5.0,
+            )
             conn.row_factory = sqlite3.Row
-            cur = conn.cursor()
-            cur.execute(
+            # Read-only PRAGMAs keep the connection cheap for repeated lookups.
+            conn.execute("PRAGMA query_only = ON")
+            self._thread_local.conn = conn
+        return conn
+
+    def _lookup(self, word: str) -> Optional[dict]:
+        # Open-close-on-every-call was sub-ms wasted plus a real connection
+        # leak whenever the row fetch raised mid-cursor — the conn.close()
+        # was outside the try block. Using a per-thread cached connection
+        # also lets the SQLite cache stay warm across the batch.
+        try:
+            conn = self._get_connection()
+            cur = conn.execute(
                 "SELECT * FROM stardict WHERE word = ? COLLATE NOCASE LIMIT 1",
-                (word.lower(),)
+                (word.lower(),),
             )
             row = cur.fetchone()
-            conn.close()
             return dict(row) if row else None
         except Exception as exc:
             logger.warning("ECDICT lookup failed for '%s': %s", word, exc)
+            # Drop the cached connection so the next call re-opens cleanly.
+            self._close_connection()
             return None
+
+    def _close_connection(self) -> None:
+        conn = getattr(self._thread_local, "conn", None)
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:   # noqa: BLE001
+                pass
+            self._thread_local.conn = None
 
     def _to_vocab_entry(self, word: str, row: dict, base: LemmaEntry) -> VocabEntry:
         raw_pos = (row.get("pos") or "").split("/")[0].strip()
@@ -170,26 +206,29 @@ class ECDICTProvider(BaseVocabProvider):
         )
 
     async def enrich(self, entries: List[LemmaEntry], context_text: str = "") -> List[VocabEntry]:
-        results: List[VocabEntry] = []
+        if not entries:
+            return []
 
-        for entry in entries:
+        # Dispatch the SQLite lookups to the default thread pool so the
+        # event loop stays responsive while a 50-word batch is enriched.
+        # The per-thread connection cache makes each lookup sub-ms once warm.
+        def _do_one(entry: LemmaEntry) -> VocabEntry:
             row = self._lookup(entry.lemma)
             if row:
-                results.append(self._to_vocab_entry(entry.lemma, row, entry))
-            else:
-                results.append(VocabEntry(
-                    headword=entry.lemma,
-                    lemma=entry.lemma,
-                    family=entry.family_id,
-                    pos=entry.pos,
-                    chinese_meaning="",
-                    english_definition="",
-                    body_count=entry.body_count,
-                    stem_count=entry.stem_count,
-                    option_count=entry.option_count,
-                    total_count=entry.total_count,
-                    score=entry.score,
-                    source="ecdict_not_found",
-                ))
+                return self._to_vocab_entry(entry.lemma, row, entry)
+            return VocabEntry(
+                headword=entry.lemma,
+                lemma=entry.lemma,
+                family=entry.family_id,
+                pos=entry.pos,
+                chinese_meaning="",
+                english_definition="",
+                body_count=entry.body_count,
+                stem_count=entry.stem_count,
+                option_count=entry.option_count,
+                total_count=entry.total_count,
+                score=entry.score,
+                source="ecdict_not_found",
+            )
 
-        return results
+        return await asyncio.to_thread(lambda: [_do_one(e) for e in entries])
