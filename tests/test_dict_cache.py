@@ -67,3 +67,23 @@ def test_dict_cache_memory_layer_serves_after_disk_clear(isolated_db):
     out = dict_cache.get("merriam_webster", "aware")
     assert out is not None
     assert out.english_definition == "having knowledge"
+
+
+def test_dict_cache_prune_expired_drops_stale_negative_entries(isolated_db, monkeypatch):
+    """prune_expired evicts negative-cache entries past the TTL window."""
+    import time as _time
+
+    from backend.services import dict_cache
+    dict_cache.clear()
+    dict_cache.mark_miss("free_dict", "ephemeral")
+    assert dict_cache.is_known_miss("free_dict", "ephemeral") is True
+
+    # Jump time forward beyond the TTL. We monkeypatch dict_cache.time, not the
+    # global module, so other tests' clocks stay normal.
+    real_time = _time.time()
+    monkeypatch.setattr(dict_cache.time, "time", lambda: real_time + dict_cache._NEGATIVE_TTL_SECONDS + 60)
+
+    dropped = dict_cache.prune_expired()
+    assert dropped["negative_dropped"] >= 1
+    # After pruning, the original (under skewed clock) is gone.
+    assert dict_cache.is_known_miss("free_dict", "ephemeral") is False

@@ -1,6 +1,10 @@
 (function () {
   let APP_CONFIG = null;
-  const state = { rawOrder: "desc", lemmaOrder: "desc", familyOrder: "desc", vocabKey: "score", vocabOrder: "desc" };
+  const state = {
+    rawOrder: "desc", lemmaOrder: "desc", familyOrder: "desc",
+    vocabKey: "score", vocabOrder: "desc",
+    vocabPage: 1, vocabPageSize: 48,
+  };
   const originalShowApp = typeof showApp === "function" ? showApp : null;
   const originalSortData = typeof sortData === "function" ? sortData : null;
 
@@ -10,6 +14,143 @@
 
   function sleep(ms) {
     return new Promise((resolve) => setTimeout(resolve, ms));
+  }
+
+  // Debounce keystroke-driven re-renders. Without this, every keystroke in the
+  // search inputs rebuilds the whole rows array + DOM — janky on big exams.
+  function debounce(fn, wait) {
+    let timer = null;
+    return function debounced(...args) {
+      if (timer) clearTimeout(timer);
+      timer = setTimeout(() => { timer = null; fn.apply(this, args); }, wait);
+    };
+  }
+
+  // ─── Virtualised table machinery ───────────────────────────────────────
+  // We render only the rows that are inside (or near) the visible viewport,
+  // plus an over-render buffer so fast scrolls don't show blank space. Row
+  // height is measured once from the first rendered row; afterwards the
+  // virtualiser converts scrollTop → first-visible-index directly.
+  const ROW_HEIGHT_DEFAULT = 36;     // px estimate before measurement
+  const OVERSCAN = 8;                // rows above/below the viewport
+  const _virtualisers = new Map();   // tbody.id → { rows, render, rowHeight }
+
+  function _findScrollContainer(tbody) {
+    let parent = tbody.parentElement;
+    while (parent) {
+      if (parent.classList && parent.classList.contains("tbl-virtual")) return parent;
+      if (parent.classList && parent.classList.contains("tbl-wrap")) return parent;
+      parent = parent.parentElement;
+    }
+    return tbody.parentElement;
+  }
+
+  function _promoteToVirtualWrap(tbody) {
+    const wrap = _findScrollContainer(tbody);
+    if (!wrap) return null;
+    if (!wrap.classList.contains("tbl-virtual")) {
+      wrap.classList.remove("tbl-wrap");
+      wrap.classList.add("tbl-virtual");
+    }
+    return wrap;
+  }
+
+  function _measureRowHeight(tbody, fallback) {
+    const first = tbody.querySelector("tr:not(.vr-spacer-top):not(.vr-spacer-bot)");
+    if (!first) return fallback;
+    const rect = first.getBoundingClientRect();
+    return rect.height > 8 ? rect.height : fallback;
+  }
+
+  function renderVirtualTable(tbody, rows, rowToHtml, colCount, statusEl) {
+    if (!tbody) return;
+    const wrap = _promoteToVirtualWrap(tbody);
+    if (!wrap) {
+      tbody.innerHTML = rows.map((row, i) => rowToHtml(row, i)).join("");
+      return;
+    }
+    const existing = _virtualisers.get(tbody.id) || {};
+    const rowHeight = existing.rowHeight || ROW_HEIGHT_DEFAULT;
+    const total = rows.length;
+
+    const renderSlice = () => {
+      const v = _virtualisers.get(tbody.id);
+      if (!v) return;
+      const viewportH = wrap.clientHeight || 1;
+      const scrollTop = wrap.scrollTop;
+      const rH = v.rowHeight || ROW_HEIGHT_DEFAULT;
+      const visible = Math.ceil(viewportH / rH);
+      let startIdx = Math.max(0, Math.floor(scrollTop / rH) - OVERSCAN);
+      let endIdx = Math.min(v.rows.length, startIdx + visible + OVERSCAN * 2);
+      // Snap to the start when we have very few rows; avoids a one-row stutter.
+      if (v.rows.length <= visible + OVERSCAN * 2) { startIdx = 0; endIdx = v.rows.length; }
+
+      const before = startIdx * rH;
+      const after  = Math.max(0, (v.rows.length - endIdx) * rH);
+      const sliceHtml = v.rows.slice(startIdx, endIdx)
+        .map((row, i) => v.rowToHtml(row, startIdx + i))
+        .join("");
+      tbody.innerHTML =
+        `<tr class="vr-spacer-top" aria-hidden="true"><td colspan="${v.colCount}" style="height:${before}px"></td></tr>` +
+        sliceHtml +
+        `<tr class="vr-spacer-bot" aria-hidden="true"><td colspan="${v.colCount}" style="height:${after}px"></td></tr>`;
+
+      // First-render measurement: replace our estimate with reality.
+      if (!v.measured && v.rows.length > 0) {
+        const measured = _measureRowHeight(tbody, rH);
+        if (Math.abs(measured - rH) > 1) {
+          v.rowHeight = measured;
+          v.measured = true;
+          _virtualisers.set(tbody.id, v);
+          // Re-render once with the corrected height for a tight scrollbar fit.
+          renderSlice();
+          return;
+        }
+        v.measured = true;
+      }
+      _virtualisers.set(tbody.id, v);
+    };
+
+    const entry = { rows, rowToHtml, colCount, rowHeight, measured: false, render: renderSlice };
+    _virtualisers.set(tbody.id, entry);
+    if (statusEl) statusEl.textContent = total > 0 ? `共 ${total.toLocaleString()} 行` : "无数据";
+
+    if (!existing.scrollListener) {
+      // requestAnimationFrame coalesces multiple scroll events into one frame.
+      let scheduled = false;
+      const onScroll = () => {
+        if (scheduled) return;
+        scheduled = true;
+        requestAnimationFrame(() => { scheduled = false; renderSlice(); });
+      };
+      wrap.addEventListener("scroll", onScroll, { passive: true });
+      entry.scrollListener = onScroll;
+      _virtualisers.set(tbody.id, entry);
+
+      // ResizeObserver re-renders when the panel becomes visible (tab switch).
+      // Without this, switching from a hidden tab leaves an empty viewport.
+      if (typeof ResizeObserver !== "undefined") {
+        const ro = new ResizeObserver(() => renderSlice());
+        ro.observe(wrap);
+        entry.resizeObserver = ro;
+        _virtualisers.set(tbody.id, entry);
+      }
+    }
+
+    renderSlice();
+  }
+
+  function _ensureMetaLine(tbody, metaId) {
+    let meta = document.getElementById(metaId);
+    if (meta) return meta;
+    const wrap = _findScrollContainer(tbody);
+    if (!wrap || !wrap.parentElement) return null;
+    meta = document.createElement("div");
+    meta.id = metaId;
+    meta.className = "tbl-meta";
+    meta.innerHTML = `<span class="count-pill">0 行</span>`;
+    wrap.parentElement.insertBefore(meta, wrap.nextSibling);
+    return meta.querySelector(".count-pill");
   }
 
   function setValue(id, value, isCheckbox) {
@@ -140,28 +281,44 @@
     return Boolean(CURRENT_USER && currentTaskId && document.getElementById("main-app").style.display !== "none");
   }
 
-  window.vocabCardHtml = function (entry) {
-    const action = canEditVocab()
-      ? `<button class="vocab-delete-btn" onclick="deleteCurrentVocabWord('${escAttr(entry.headword || entry.lemma)}')">删除</button>`
+  function _levelBadge(level) {
+    return typeof window.levelBadge === "function" ? window.levelBadge(level) : "";
+  }
+
+  window.vocabCardHtml = function (entry, selectable) {
+    const editable = canEditVocab();
+    const isSelectable = selectable !== false && editable;
+    const deselected = isSelectable && entry.selected === false;
+    const cbHtml = isSelectable
+      ? `<input type="checkbox" class="sel-cb" ${entry.selected !== false ? "checked" : ""}
+           onchange="toggleWordSelect('${escAttr(entry.headword)}', this.checked)"
+           onclick="event.stopPropagation()" title="选中/取消" />`
       : "";
-    return `<div class="vocab-card">
+    const deleteBtn = editable
+      ? `<button class="vocab-delete-btn" onclick="event.stopPropagation();deleteCurrentVocabWord('${escAttr(entry.headword || entry.lemma)}')">删除</button>`
+      : "";
+    const cardClick = isSelectable
+      ? ` onclick="toggleWordSelectCard('${escAttr(entry.headword)}')"`
+      : "";
+    return `<div class="vocab-card${deselected ? " deselected" : ""}" id="vc-${escAttr(entry.headword)}"${cardClick}>
+      ${cbHtml}
       <div class="vocab-card-top">
         <div>
-          <div class="hw">${esc(entry.headword)}</div>
-          <div class="meta">${esc(entry.pos || "")}${entry.family ? " · 词族: " + esc(entry.family) : ""} · 来源: ${esc(entry.source || "")}</div>
+          <div class="hw-row"><span class="hw">${esc(entry.headword)}</span>${_levelBadge(entry.word_level)}</div>
+          <div class="meta">${esc(entry.pos || "")}${entry.family ? " · 词族: " + esc(entry.family) : ""} · <span style="color:var(--primary)">${esc(entry.source || "")}</span></div>
         </div>
-        <div class="vocab-card-actions">${action}</div>
+        <div class="vocab-card-actions">${deleteBtn}</div>
       </div>
       ${entry.chinese_meaning ? `<div class="cn">${esc(entry.chinese_meaning)}</div>` : ""}
       ${entry.english_definition ? `<div class="en">${esc(entry.english_definition)}</div>` : ""}
-      ${entry.example_sentence ? `<div class="ex">${esc(entry.example_sentence)}</div>` : ""}
-      ${entry.notes ? `<div class="note">提示: ${esc(entry.notes)}</div>` : ""}
+      ${entry.example_sentence ? `<div class="ex">"${esc(entry.example_sentence)}"</div>` : ""}
+      ${entry.notes ? `<div class="note">💡 ${esc(entry.notes)}</div>` : ""}
       <div class="counts">
         <span class="c-badge">正文 ${entry.body_count}</span>
         <span class="c-badge">题干 ${entry.stem_count}</span>
-        <span class="c-badge" style="background:#ffedd5;color:#c2410c">选项 ${entry.option_count}</span>
-        <span class="c-badge">总计 ${entry.total_count}</span>
-        <span class="c-badge" style="background:#dbeafe;color:#1d4ed8">分数 ${entry.score}</span>
+        <span class="c-badge badge-option">选项 ${entry.option_count}</span>
+        <span class="c-badge">总 ${entry.total_count}</span>
+        <span class="c-badge badge-score">分 ${entry.score}</span>
       </div>
     </div>`;
   };
@@ -175,65 +332,187 @@
     return state.vocabOrder === "asc" ? rows.reverse() : rows;
   }
 
+  function _rawRowHtml(row, index) {
+    return `<tr>
+      <td>${index + 1}</td><td><b>${esc(row.surface)}</b></td><td>${esc(row.lemma)}</td>
+      <td>${esc(row.pos)}</td><td><small>${esc(row.family_id || "")}</small></td>
+      <td class="num">${row.body_count}</td><td class="num">${row.stem_count}</td>
+      <td class="num cell-option">${row.option_count}</td>
+      <td class="num">${row.total_count}</td><td class="num score-cell">${row.score}</td>
+    </tr>`;
+  }
+
+  function _lemmaRowHtml(row, index) {
+    const surfaceTags = (row.surface_forms || []).map((s) => `<span class="tag">${esc(s)}</span>`).join("");
+    return `<tr>
+      <td>${index + 1}</td><td><b>${esc(row.lemma)}</b></td><td>${esc(row.pos)}</td>
+      <td><small>${esc(row.family_id || "")}</small></td>
+      <td>${surfaceTags}</td>
+      <td class="num">${row.body_count}</td><td class="num">${row.stem_count}</td>
+      <td class="num cell-option">${row.option_count}</td>
+      <td class="num">${row.total_count}</td><td class="num score-cell">${row.score}</td>
+    </tr>`;
+  }
+
+  function _familyRowHtml(row, index) {
+    const members = (row.members || []).map((m) => `<span class="tag tag-orange">${esc(m)}</span>`).join("");
+    return `<tr>
+      <td>${index + 1}</td><td><b>${esc(row.family_id)}</b></td>
+      <td>${members}</td>
+      <td class="num">${row.body_count}</td><td class="num">${row.stem_count}</td>
+      <td class="num cell-option">${row.option_count}</td>
+      <td class="num">${row.total_count}</td><td class="num score-cell">${row.score}</td>
+    </tr>`;
+  }
+
   window.renderRaw = function (sortKey) {
     if (sortKey) rawSortKey = sortKey;
     if (!resultData) return;
+    const tbody = document.getElementById("raw-tbody");
+    if (!tbody) return;
     const query = (document.getElementById("raw-search") || { value: "" }).value.toLowerCase();
     let rows = sortWithOrder(resultData.word_table || [], rawSortKey, state.rawOrder);
     if (query) rows = rows.filter((row) => row.surface.includes(query) || row.lemma.includes(query));
-    document.getElementById("raw-tbody").innerHTML = rows.slice(0, 500).map((row, index) => `
-      <tr>
-        <td>${index + 1}</td><td><b>${esc(row.surface)}</b></td><td>${esc(row.lemma)}</td>
-        <td>${esc(row.pos)}</td><td><small>${esc(row.family_id || "")}</small></td>
-        <td class="num">${row.body_count}</td><td class="num">${row.stem_count}</td>
-        <td class="num"><b style="color:var(--warn)">${row.option_count}</b></td>
-        <td class="num">${row.total_count}</td><td class="num score-cell">${row.score}</td>
-      </tr>`).join("");
+    const meta = _ensureMetaLine(tbody, "raw-meta");
+    renderVirtualTable(tbody, rows, _rawRowHtml, 10, meta);
   };
 
   window.renderLemma = function (sortKey) {
     if (sortKey) lemmaSortKey = sortKey;
     if (!resultData) return;
+    const tbody = document.getElementById("lemma-tbody");
+    if (!tbody) return;
     const query = (document.getElementById("lemma-search") || { value: "" }).value.toLowerCase();
     let rows = sortWithOrder(resultData.lemma_table || [], lemmaSortKey, state.lemmaOrder);
     if (query) rows = rows.filter((row) => row.lemma.includes(query));
-    document.getElementById("lemma-tbody").innerHTML = rows.slice(0, 500).map((row, index) => `
-      <tr>
-        <td>${index + 1}</td><td><b>${esc(row.lemma)}</b></td><td>${esc(row.pos)}</td>
-        <td><small>${esc(row.family_id || "")}</small></td>
-        <td>${(row.surface_forms || []).map((surface) => `<span class="tag">${esc(surface)}</span>`).join("")}</td>
-        <td class="num">${row.body_count}</td><td class="num">${row.stem_count}</td>
-        <td class="num"><b style="color:var(--warn)">${row.option_count}</b></td>
-        <td class="num">${row.total_count}</td><td class="num score-cell">${row.score}</td>
-      </tr>`).join("");
+    const meta = _ensureMetaLine(tbody, "lemma-meta");
+    renderVirtualTable(tbody, rows, _lemmaRowHtml, 10, meta);
   };
 
   window.renderFamily = function (sortKey) {
     if (sortKey) familySortKey = sortKey;
     if (!resultData) return;
+    const tbody = document.getElementById("family-tbody");
+    if (!tbody) return;
     const rows = sortWithOrder(resultData.family_table || [], familySortKey, state.familyOrder);
-    document.getElementById("family-tbody").innerHTML = rows.slice(0, 300).map((row, index) => `
-      <tr>
-        <td>${index + 1}</td><td><b>${esc(row.family_id)}</b></td>
-        <td>${(row.members || []).map((member) => `<span class="tag tag-orange">${esc(member)}</span>`).join("")}</td>
-        <td class="num">${row.body_count}</td><td class="num">${row.stem_count}</td>
-        <td class="num"><b style="color:var(--warn)">${row.option_count}</b></td>
-        <td class="num">${row.total_count}</td><td class="num score-cell">${row.score}</td>
-      </tr>`).join("");
+    const meta = _ensureMetaLine(tbody, "family-meta");
+    renderVirtualTable(tbody, rows, _familyRowHtml, 8, meta);
   };
+
+  // Debounced rerenders attached to the search inputs. Without this, every
+  // keystroke during a search rebuilds the whole rows array.
+  const _debouncedRaw   = debounce(() => window.renderRaw(), 90);
+  const _debouncedLemma = debounce(() => window.renderLemma(), 90);
+  function _wireDebouncedSearch() {
+    const raw = document.getElementById("raw-search");
+    if (raw && !raw.dataset.enhanced) {
+      raw.addEventListener("input", _debouncedRaw);
+      raw.setAttribute("oninput", "");   // disable the inline handler
+      raw.dataset.enhanced = "1";
+    }
+    const lemma = document.getElementById("lemma-search");
+    if (lemma && !lemma.dataset.enhanced) {
+      lemma.addEventListener("input", _debouncedLemma);
+      lemma.setAttribute("oninput", "");
+      lemma.dataset.enhanced = "1";
+    }
+  }
+
+  function _ensureVocabPager(grid) {
+    let pager = document.getElementById("vocab-pager");
+    if (pager) return pager;
+    pager = document.createElement("div");
+    pager.id = "vocab-pager";
+    pager.className = "vocab-pager";
+    pager.innerHTML = `
+      <button type="button" data-act="prev">◀ 上一页</button>
+      <span class="vp-info" id="vocab-pager-info"></span>
+      <button type="button" data-act="next">下一页 ▶</button>
+      <span style="font-size:.82rem;color:var(--muted);margin-left:.5rem">每页</span>
+      <select id="vocab-page-size" class="sort-order-select">
+        <option value="24">24</option>
+        <option value="48" selected>48</option>
+        <option value="96">96</option>
+        <option value="200">200</option>
+      </select>
+    `;
+    grid.parentElement.insertBefore(pager, grid.nextSibling);
+    pager.querySelector('[data-act="prev"]').addEventListener("click", () => {
+      if (state.vocabPage > 1) { state.vocabPage -= 1; window.renderVocab((resultData && resultData.vocab_table) || []); }
+    });
+    pager.querySelector('[data-act="next"]').addEventListener("click", () => {
+      state.vocabPage += 1;
+      window.renderVocab((resultData && resultData.vocab_table) || []);
+    });
+    pager.querySelector("#vocab-page-size").addEventListener("change", (event) => {
+      const next = Number(event.target.value) || 48;
+      state.vocabPageSize = next;
+      state.vocabPage = 1;
+      window.renderVocab((resultData && resultData.vocab_table) || []);
+    });
+    return pager;
+  }
 
   window.renderVocab = function (vocab) {
     const empty = document.getElementById("vocab-empty");
     const grid = document.getElementById("vocab-grid");
     if (!empty || !grid) return;
+    const toolbar = document.getElementById("vocab-toolbar");
+
     if (!vocab || vocab.length === 0) {
       empty.style.display = "";
       grid.innerHTML = "";
+      const pager = document.getElementById("vocab-pager");
+      if (pager) pager.style.display = "none";
+      if (toolbar) toolbar.style.display = "none";
       return;
     }
     empty.style.display = "none";
-    grid.innerHTML = sortVocab(vocab).map((entry) => vocabCardHtml(entry)).join("");
+    if (toolbar) toolbar.style.display = "";
+
+    // Honour the level filter set by the legacy toolbar (高考/超纲/基础).
+    const levelFilter = typeof _vocabFilter !== "undefined" ? _vocabFilter : "all";
+    const filtered = levelFilter === "all"
+      ? vocab
+      : vocab.filter((v) => (v.word_level || "") === levelFilter);
+
+    const sorted = sortVocab(filtered);
+    const pageSize = state.vocabPageSize || 48;
+    const totalPages = Math.max(1, Math.ceil(sorted.length / pageSize));
+    if (state.vocabPage > totalPages) state.vocabPage = totalPages;
+    if (state.vocabPage < 1) state.vocabPage = 1;
+    const start = (state.vocabPage - 1) * pageSize;
+    const slice = sorted.slice(start, start + pageSize);
+    grid.innerHTML = slice.map((entry) => vocabCardHtml(entry, true)).join("");
+
+    if (typeof updateSelCount === "function") {
+      try { updateSelCount(vocab); } catch (_) { /* tolerate stale toolbar */ }
+    }
+
+    // Pagination only matters for big lists; hide the bar otherwise.
+    const pager = _ensureVocabPager(grid);
+    if (sorted.length <= pageSize) {
+      pager.style.display = "none";
+    } else {
+      pager.style.display = "";
+      const info = pager.querySelector("#vocab-pager-info");
+      if (info) info.textContent = `第 ${state.vocabPage} / ${totalPages} 页 · 共 ${sorted.length} 条`;
+      pager.querySelector('[data-act="prev"]').disabled = state.vocabPage <= 1;
+      pager.querySelector('[data-act="next"]').disabled = state.vocabPage >= totalPages;
+      const sizeSel = pager.querySelector("#vocab-page-size");
+      if (sizeSel && Number(sizeSel.value) !== pageSize) sizeSel.value = String(pageSize);
+    }
   };
+
+  // Reset to page 1 when the level filter changes — otherwise switching from
+  // "all" (page 5) to "超纲" (only 8 results) silently shows page 5 of 1.
+  if (typeof window.filterVocabLevel === "function") {
+    const _origFilter = window.filterVocabLevel;
+    window.filterVocabLevel = function (level) {
+      state.vocabPage = 1;
+      return _origFilter.apply(this, arguments);
+    };
+  }
 
   window.startAnalysis = async function () {
     if (!currentFile) return;
@@ -621,10 +900,28 @@
   window.showApp = async function () {
     if (originalShowApp) originalShowApp.apply(this, arguments);
     await loadConfig(true);
+    _wireDebouncedSearch();
+  };
+
+  // Re-trigger the active virtualised table to lay out its viewport correctly
+  // when the user switches to a previously-hidden tab. Without this nudge the
+  // scroll container reports clientHeight=0 on first paint and only renders
+  // the over-render buffer.
+  const _originalSwitchTab = typeof window.switchTab === "function" ? window.switchTab : null;
+  window.switchTab = function (tabId) {
+    if (_originalSwitchTab) _originalSwitchTab.apply(this, arguments);
+    requestAnimationFrame(() => {
+      const map = { "tab-raw": "raw-tbody", "tab-lemma": "lemma-tbody", "tab-family": "family-tbody" };
+      const id = map[tabId];
+      if (!id) return;
+      const v = _virtualisers.get(id);
+      if (v && typeof v.render === "function") v.render();
+    });
   };
 
   ensureAnalysisControls();
   ensureSortControls();
   ensureAdminUi();
+  _wireDebouncedSearch();
   loadConfig();
 })();

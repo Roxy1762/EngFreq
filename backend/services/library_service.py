@@ -351,13 +351,58 @@ def enroll_in_review(db: Session, *, user_id: int, headword: str) -> ReviewItem:
 
 
 def enroll_many(db: Session, *, user_id: int, headwords: Iterable[str]) -> int:
-    count = 0
+    """Bulk-enroll a list of headwords into the review queue.
+
+    Previously called enroll_in_review() in a loop — N queries + N commits.
+    Now does:
+      1. Dedup the incoming list (case-trimmed)
+      2. Fetch all existing ReviewItems for those headwords in one query
+      3. Fetch matching LibraryWord rows in one query (for library_word_id link)
+      4. Bulk-insert the missing ones and commit once
+    For a 50-word import, that drops from ~100 queries to 3.
+    """
+    seen: set[str] = set()
+    cleaned: List[str] = []
     for hw in headwords:
         if not hw:
             continue
-        enroll_in_review(db, user_id=user_id, headword=hw)
-        count += 1
-    return count
+        norm = hw.strip()
+        if not norm or norm in seen:
+            continue
+        seen.add(norm)
+        cleaned.append(norm)
+    if not cleaned:
+        return 0
+
+    existing_hws = {
+        row[0]
+        for row in db.query(ReviewItem.headword)
+        .filter(ReviewItem.user_id == user_id, ReviewItem.headword.in_(cleaned))
+        .all()
+    }
+    library_link = {
+        row.headword: row.id
+        for row in db.query(LibraryWord)
+        .filter(LibraryWord.user_id == user_id, LibraryWord.headword.in_(cleaned))
+        .all()
+    }
+
+    now = _utcnow()
+    new_items = [
+        ReviewItem(
+            user_id=user_id,
+            headword=hw,
+            library_word_id=library_link.get(hw),
+            box=0,
+            due_at=now,
+        )
+        for hw in cleaned
+        if hw not in existing_hws
+    ]
+    if new_items:
+        db.add_all(new_items)
+        db.commit()
+    return len(cleaned)
 
 
 def remove_from_review(db: Session, *, user_id: int, headword: str) -> bool:

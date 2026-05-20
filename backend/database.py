@@ -147,7 +147,7 @@ class ReviewItem(Base):
     id = Column(Integer, primary_key=True, index=True)
     user_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
     headword = Column(String(64), nullable=False, index=True)
-    library_word_id = Column(Integer, ForeignKey("library_words.id"), nullable=True)
+    library_word_id = Column(Integer, ForeignKey("library_words.id"), nullable=True, index=True)
     box = Column(Integer, nullable=False, default=0)              # 0..4 — Leitner box
     correct_streak = Column(Integer, nullable=False, default=0)
     review_count = Column(Integer, nullable=False, default=0)
@@ -159,6 +159,10 @@ class ReviewItem(Base):
     __table_args__ = (
         # Queue query: due items for one user, oldest first.
         Index("ix_review_items_user_due", "user_id", "due_at"),
+        # Single-row lookup by (user, headword): hit on every enroll/grade.
+        # Without the composite, SQLite picks the user_id index then filters in
+        # memory; with it, we get one B-tree probe per call.
+        Index("ix_review_items_user_headword", "user_id", "headword"),
     )
 
 

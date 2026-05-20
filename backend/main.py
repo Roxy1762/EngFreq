@@ -170,13 +170,45 @@ _ensure_admin()
 # ── Lifespan (replaces deprecated @app.on_event) ─────────────────────────────
 @asynccontextmanager
 async def _lifespan(app: FastAPI):
+    # Pre-warm the spaCy pipeline off the request path so the first analysis
+    # request doesn't pay the ~1s model-load tax. Runs in a thread because
+    # spacy.load() is synchronous I/O + heavy CPU init.
+    try:
+        from backend.services.word_processor import _load_spacy  # noqa: PLC2701
+        await asyncio.to_thread(_load_spacy)
+    except Exception:   # noqa: BLE001
+        logger.warning("Pre-warm of spaCy pipeline failed; will lazy-load on first use.")
+
     # Start the background backup scheduler. It self-disables when the admin
     # hasn't enabled it yet, so it's safe to always boot.
     from backend.services import backup_scheduler
     backup_scheduler.start_scheduler()
+
+    # Periodic cache-hygiene task: prunes expired dict_cache negative/positive
+    # entries every hour. Negative cache uses a 6h TTL but only evicts on read,
+    # so without this background sweep stale "miss" rows pile up in long-lived
+    # servers and waste the size cap on entries that will never be re-queried.
+    async def _cache_pruner_loop() -> None:
+        from backend.services import dict_cache
+        while True:
+            try:
+                await asyncio.sleep(60 * 60)
+                dropped = await asyncio.to_thread(dict_cache.prune_expired)
+                if dropped["negative_dropped"] or dropped["positive_dropped"]:
+                    logger.info(
+                        "dict_cache pruned: -%d negative, -%d positive",
+                        dropped["negative_dropped"], dropped["positive_dropped"],
+                    )
+            except asyncio.CancelledError:
+                raise
+            except Exception:   # noqa: BLE001
+                logger.exception("dict_cache prune tick failed; continuing")
+
+    cache_pruner = asyncio.create_task(_cache_pruner_loop(), name="dict-cache-pruner")
     try:
         yield
     finally:
+        cache_pruner.cancel()
         try:
             await backup_scheduler.stop_scheduler()
         except Exception:   # noqa: BLE001
