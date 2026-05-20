@@ -140,46 +140,55 @@ def detect_ocr_capabilities() -> Dict[str, Any]:
     }
 
 
+def _load_config(db: Session) -> RuntimeConfig:
+    """Read + validate the persisted runtime config from an open session."""
+    record = db.query(AppSetting).filter_by(key=_RUNTIME_CONFIG_KEY).first()
+    if not record:
+        return _default_config()
+    payload = json.loads(record.value_json or "{}")
+    defaults = _default_config().model_dump()
+    merged = _deep_merge(defaults, payload)
+    return RuntimeConfig.model_validate(merged)
+
+
 def get_runtime_config(db: Optional[Session] = None) -> RuntimeConfig:
-    owned_db = db is None
-    if owned_db:
-        db = SessionLocal()
+    # Context-manager form guarantees the session is closed even when
+    # validation raises mid-load. The previous try/finally pattern reached
+    # the close in the common case but a Pydantic validation failure between
+    # model_validate() and the finally block could surface a partially-
+    # initialised session to the next caller.
+    if db is not None:
+        try:
+            return _load_config(db)
+        except Exception as exc:   # noqa: BLE001
+            logger.warning("Failed to load runtime config, using defaults: %s", exc)
+            return _default_config()
 
     try:
-        record = db.query(AppSetting).filter_by(key=_RUNTIME_CONFIG_KEY).first()
-        if not record:
-            return _default_config()
-        payload = json.loads(record.value_json or "{}")
-        defaults = _default_config().model_dump()
-        merged = _deep_merge(defaults, payload)
-        return RuntimeConfig.model_validate(merged)
-    except Exception as exc:
+        with SessionLocal() as owned:
+            return _load_config(owned)
+    except Exception as exc:   # noqa: BLE001
         logger.warning("Failed to load runtime config, using defaults: %s", exc)
         return _default_config()
-    finally:
-        if owned_db and db is not None:
-            db.close()
 
 
 def save_runtime_config(payload: Dict[str, Any], db: Optional[Session] = None) -> RuntimeConfig:
-    owned_db = db is None
-    if owned_db:
-        db = SessionLocal()
-
-    try:
-        current = get_runtime_config(db).model_dump()
+    def _save(session: Session) -> RuntimeConfig:
+        current = _load_config(session).model_dump()
         merged = _deep_merge(current, payload)
         model = RuntimeConfig.model_validate(merged)
-        record = db.query(AppSetting).filter_by(key=_RUNTIME_CONFIG_KEY).first()
+        record = session.query(AppSetting).filter_by(key=_RUNTIME_CONFIG_KEY).first()
         if not record:
             record = AppSetting(key=_RUNTIME_CONFIG_KEY, value_json="{}")
-            db.add(record)
+            session.add(record)
         record.value_json = model.model_dump_json()
-        db.commit()
+        session.commit()
         return model
-    finally:
-        if owned_db and db is not None:
-            db.close()
+
+    if db is not None:
+        return _save(db)
+    with SessionLocal() as owned:
+        return _save(owned)
 
 
 def frontend_config_payload() -> Dict[str, Any]:

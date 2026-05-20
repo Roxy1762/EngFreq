@@ -63,6 +63,17 @@ class SchedulerOutcome:
 
 # ── Library operations ────────────────────────────────────────────────────────
 
+def _escape_like(value: str) -> str:
+    """Escape SQL LIKE wildcards so user input matches literally.
+
+    Without this, a tag of ``"100%"`` becomes a wildcard matching every
+    row; a search for ``"un_known"`` accidentally matches "unknown",
+    "unaknown", and so on. We use a backslash escape and pair it with
+    ``escape='\\\\'`` on the LIKE call so SQLite recognises it.
+    """
+    return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+
 def list_library(
     db: Session, *, user_id: int, tag: Optional[str] = None,
     search: Optional[str] = None, limit: int = 200, offset: int = 0,
@@ -74,10 +85,11 @@ def list_library(
     elif not include_mastered:
         q = q.filter(LibraryWord.mastered.is_(False))
     if tag:
-        q = q.filter(LibraryWord.tags.like(f"%{tag.strip().lower()}%"))
+        tag_pattern = f"%{_escape_like(tag.strip().lower())}%"
+        q = q.filter(LibraryWord.tags.like(tag_pattern, escape="\\"))
     if search:
-        like = f"%{search.strip().lower()}%"
-        q = q.filter(LibraryWord.headword.ilike(like))
+        like = f"%{_escape_like(search.strip().lower())}%"
+        q = q.filter(LibraryWord.headword.ilike(like, escape="\\"))
     q = q.order_by(LibraryWord.created_at.desc()).offset(offset).limit(limit)
     return [_row_to_dict(row) for row in q.all()]
 

@@ -16,6 +16,23 @@ User data:
   GET  /api/codes             List current user's exam codes + dict codes
   GET  /api/providers         Available vocab providers
 
+AI Vocabulary Coach (Feature 1 — interactive chat with library context):
+  GET    /api/coach/threads             List the user's coach threads
+  POST   /api/coach/threads             Create a thread (optionally with first message)
+  GET    /api/coach/threads/{id}        Fetch a thread + its messages
+  PUT    /api/coach/threads/{id}        Update title/pin/archive/focus_words
+  DELETE /api/coach/threads/{id}        Delete a thread + its messages
+  POST   /api/coach/threads/{id}/messages  Send a turn, get the assistant reply
+  POST   /api/coach/ask                 One-shot Q&A without persisting
+  GET    /api/coach/stats               Usage summary (threads, messages, tokens)
+
+Adaptive Daily Study Plan (Feature 2 — personalised review queue + new words):
+  GET  /api/plan/today                 Today's plan (auto-creates if missing)
+  POST /api/plan/today/refresh         Rebuild today's plan with new targets
+  POST /api/plan/items/{id}/complete   Mark a plan item completed
+  GET  /api/plan/history?days=N        Past plans (most recent first)
+  GET  /api/plan/insights?days=N       Aggregate accuracy/completion/momentum
+
 Public share (no auth needed):
   GET  /api/share/exam/{code} View full analysis result by exam code
   GET  /api/share/dict/{code} View vocabulary by dict code
@@ -24,6 +41,8 @@ Admin (requires admin account):
   GET  /admin/users                        List all users
   POST /admin/users/{id}/reset-password    Reset a user's password
   GET  /admin/codes                        List all exam/dict codes with owner info
+  GET  /admin/metrics                      Provider call counts / latency / token use
+  POST /admin/metrics/reset                Reset metrics counters (all or one provider)
 
 Frontend:
   GET  /                      Serve frontend SPA
@@ -63,6 +82,10 @@ from backend.models.schemas import (
     AnalysisResult,
     AnalyzeRequest,
     ChangePasswordRequest,
+    CoachAskRequest,
+    CoachMessagePost,
+    CoachThreadCreate,
+    CoachThreadUpdate,
     FilterConfig,
     LemmaEntry,
     LibraryAddRequest,
@@ -77,6 +100,7 @@ from backend.models.schemas import (
     QuizSubmitRequest,
     RelatedWordsRequest,
     ReviewSubmitRequest,
+    StudyPlanRefresh,
     TaskStatus,
     UserProfileUpdate,
     VocabEntry,
@@ -2824,6 +2848,368 @@ async def admin_migration_run_backup_now(
         "status": status.__dict__ if hasattr(status, "__dict__") else status,
         "view": backup_scheduler.serialize_schedule_view(),
     }
+
+
+# ── Feature: AI Vocabulary Coach (智能词汇教练) ──────────────────────────────
+#
+# Interactive multi-turn chat that auto-injects the student's library context
+# (saved entries, recent quiz performance, weak CEFR levels) into the system
+# prompt. Threads are persisted; the system prompt is rebuilt per turn so
+# context stays fresh as the user's library grows.
+
+from backend.utils.db_session import run_in_session
+
+
+@app.get("/api/coach/threads")
+async def coach_list_threads(
+    include_archived: bool = Query(False),
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """List the user's coach threads (most recent first; pinned bubble up)."""
+    from backend.services import coach_service
+    return {"threads": coach_service.list_threads(db, user_id=user.id, include_archived=include_archived)}
+
+
+@app.post("/api/coach/threads")
+async def coach_create_thread(
+    body: CoachThreadCreate,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Open a new thread. Optional ``initial_message`` triggers an immediate reply."""
+    from backend.services import coach_service
+    runtime = get_runtime_config(db)
+    provider_name = body.provider or runtime.vocab_provider
+    thread = coach_service.create_thread(
+        db, user_id=user.id, title=body.title,
+        focus_words=body.focus_words, provider=provider_name,
+    )
+    response: dict[str, Any] = {"thread": coach_service._thread_row(thread)}
+
+    if body.initial_message:
+        reply_payload = await _post_user_message_and_reply(
+            user=user, thread_id=thread.id, content=body.initial_message,
+            refresh_context=False,
+        )
+        response.update(reply_payload)
+    return response
+
+
+@app.get("/api/coach/threads/{thread_id}")
+async def coach_get_thread(
+    thread_id: int,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Get one thread with its full message history."""
+    from backend.services import coach_service
+    thread = coach_service.get_thread(db, user_id=user.id, thread_id=thread_id)
+    if thread is None:
+        raise HTTPException(404, "对话不存在")
+    return {
+        "thread": coach_service._thread_row(thread),
+        "messages": coach_service.get_thread_messages(db, thread=thread),
+    }
+
+
+@app.put("/api/coach/threads/{thread_id}")
+async def coach_update_thread(
+    thread_id: int,
+    body: CoachThreadUpdate,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Edit thread metadata (title, pin, archive, focus_words)."""
+    from backend.services import coach_service
+    fields = body.model_dump(exclude_none=True)
+    thread = coach_service.update_thread(db, user_id=user.id, thread_id=thread_id, fields=fields)
+    if thread is None:
+        raise HTTPException(404, "对话不存在")
+    return {"thread": coach_service._thread_row(thread)}
+
+
+@app.delete("/api/coach/threads/{thread_id}")
+async def coach_delete_thread(
+    thread_id: int,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    from backend.services import coach_service
+    if not coach_service.delete_thread(db, user_id=user.id, thread_id=thread_id):
+        raise HTTPException(404, "对话不存在")
+    return {"ok": True}
+
+
+@app.post("/api/coach/threads/{thread_id}/messages")
+async def coach_post_message(
+    thread_id: int,
+    body: CoachMessagePost,
+    user: User = Depends(get_current_user),
+):
+    """Append a student turn and return the assistant reply."""
+    payload = await _post_user_message_and_reply(
+        user=user, thread_id=thread_id, content=body.content,
+        refresh_context=body.refresh_context,
+    )
+    return payload
+
+
+@app.post("/api/coach/ask")
+async def coach_ask(
+    body: CoachAskRequest,
+    user: User = Depends(get_current_user),
+):
+    """One-shot Q&A without persisting a thread.
+
+    Useful for quick lookups from the lookup popup or library row — pulls the
+    same library context as a real thread would but doesn't write anything.
+    """
+    from backend.services import coach_service
+
+    runtime = get_runtime_config()
+    provider_name = body.provider or runtime.vocab_provider
+
+    def _build(session: Session) -> tuple[str, str]:
+        user_row = session.query(User).filter_by(id=user.id).first()
+        focus = list(body.focus_words or [])
+        sys_prompt = coach_service._build_system_prompt(
+            session, user=user_row, focus_words=focus,
+            include_library_context=body.include_library_context,
+        )
+        return sys_prompt, body.question.strip()
+
+    system_prompt, question = await run_in_session(_build)
+    try:
+        reply = await coach_service.call_coach(
+            system_prompt=system_prompt,
+            user_prompt=f"学生: {question}\n\n导师:",
+            provider_name=provider_name,
+        )
+    except RuntimeError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    except Exception as exc:   # noqa: BLE001
+        logger.exception("Coach ask failed")
+        raise HTTPException(502, f"AI 教练调用失败: {exc}") from exc
+
+    return {
+        "ok": True,
+        "answer": reply.text,
+        "provider": reply.provider,
+        "model": reply.model,
+        "input_tokens": reply.input_tokens,
+        "output_tokens": reply.output_tokens,
+        "latency_ms": reply.latency_ms,
+    }
+
+
+@app.get("/api/coach/stats")
+async def coach_stats(
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    from backend.services import coach_service
+    return coach_service.user_coach_stats(db, user_id=user.id)
+
+
+async def _post_user_message_and_reply(
+    *, user: User, thread_id: int, content: str, refresh_context: bool,
+) -> dict:
+    """Shared helper for both /threads/{id}/messages and create-with-message.
+
+    Splits the work into three async-safe phases so a slow LLM call doesn't
+    hold a DB connection: (1) fetch state, (2) await LLM, (3) persist both
+    turns. If the LLM call fails the user turn is still appended along with
+    an ``error`` row so the frontend can show what happened.
+    """
+    from backend.services import coach_service
+
+    text = (content or "").strip()
+    if not text:
+        raise HTTPException(400, "消息内容不能为空")
+
+    def _load_state(session: Session) -> dict:
+        thread = coach_service.get_thread(session, user_id=user.id, thread_id=thread_id)
+        if thread is None:
+            return {"missing": True}
+        user_row = session.query(User).filter_by(id=user.id).first()
+        msgs = (
+            session.query(coach_service.CoachMessage)
+            .filter(coach_service.CoachMessage.thread_id == thread.id)
+            .order_by(coach_service.CoachMessage.created_at.asc())
+            .all()
+        )
+        try:
+            focus_words = json.loads(thread.focus_words) if thread.focus_words else []
+        except Exception:
+            focus_words = []
+        sys_prompt = coach_service._build_system_prompt(
+            session, user=user_row, focus_words=focus_words,
+            include_library_context=True,
+        )
+        provider = thread.provider or get_runtime_config(session).vocab_provider
+        user_prompt = coach_service._history_to_user_prompt(msgs, text)
+        return {
+            "missing": False,
+            "system": sys_prompt,
+            "user_prompt": user_prompt,
+            "provider": provider,
+            "thread_id": thread.id,
+        }
+
+    state = await run_in_session(_load_state)
+    if state.get("missing"):
+        raise HTTPException(404, "对话不存在")
+
+    error_text: Optional[str] = None
+    reply = None
+    try:
+        reply = await coach_service.call_coach(
+            system_prompt=state["system"],
+            user_prompt=state["user_prompt"],
+            provider_name=state["provider"],
+        )
+    except RuntimeError as exc:
+        error_text = str(exc)
+    except Exception as exc:   # noqa: BLE001
+        logger.exception("Coach reply failed for thread %s", thread_id)
+        error_text = f"AI 教练调用失败: {exc}"
+
+    def _persist(session: Session) -> dict:
+        thread = coach_service.get_thread(session, user_id=user.id, thread_id=thread_id)
+        if thread is None:
+            raise RuntimeError("thread vanished")
+        coach_service.append_message(session, thread=thread, role="user", content=text)
+        if reply is not None:
+            coach_service.append_message(
+                session, thread=thread, role="assistant", content=reply.text,
+                provider=reply.provider, model=reply.model,
+                input_tokens=reply.input_tokens, output_tokens=reply.output_tokens,
+                latency_ms=reply.latency_ms,
+            )
+        else:
+            coach_service.append_message(
+                session, thread=thread, role="assistant",
+                content="（生成回复时出错，请重试或在管理面板配置 LLM key。）",
+                error=error_text or "unknown",
+            )
+        msgs = coach_service.get_thread_messages(session, thread=thread)
+        return {
+            "thread": coach_service._thread_row(thread),
+            "messages": msgs,
+            "reply": None if reply is None else {
+                "text": reply.text,
+                "provider": reply.provider,
+                "model": reply.model,
+                "input_tokens": reply.input_tokens,
+                "output_tokens": reply.output_tokens,
+                "latency_ms": reply.latency_ms,
+            },
+            "error": error_text,
+        }
+
+    return await run_in_session(_persist)
+
+
+# ── Feature: Adaptive Daily Study Plan (智能学习计划) ─────────────────────────
+#
+# Generates a personalised daily plan from the user's review queue + gap
+# suggestions + recent accuracy. Plans are immutable for the rest of the day
+# unless the user presses "refresh".
+
+@app.get("/api/plan/today")
+async def plan_today(
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Today's plan. Created on demand on the first call of the UTC day."""
+    from backend.services import study_plan_service
+    return study_plan_service.get_or_create_today(db, user_id=user.id)
+
+
+@app.post("/api/plan/today/refresh")
+async def plan_today_refresh(
+    body: StudyPlanRefresh,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Force-rebuild today's plan. Pre-existing completion progress is lost."""
+    from backend.services import study_plan_service
+    return study_plan_service.get_or_create_today(
+        db, user_id=user.id,
+        review_target=body.review_target,
+        learn_target=body.learn_target,
+        quiz_target=body.quiz_target,
+        include_quiz=body.include_quiz,
+        force=True,
+    )
+
+
+@app.post("/api/plan/items/{item_id}/complete")
+async def plan_item_complete(
+    item_id: int,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Mark a plan item as completed and bump the per-kind counter."""
+    from backend.services import study_plan_service
+    payload = study_plan_service.mark_item_complete(db, user_id=user.id, item_id=item_id)
+    if payload is None:
+        raise HTTPException(404, "学习计划项不存在")
+    return payload
+
+
+@app.get("/api/plan/history")
+async def plan_history(
+    days: int = Query(14, ge=1, le=90),
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Past plans (most recent first) with per-plan completion %."""
+    from backend.services import study_plan_service
+    return study_plan_service.history(db, user_id=user.id, days=days)
+
+
+@app.get("/api/plan/insights")
+async def plan_insights(
+    days: int = Query(30, ge=1, le=90),
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Aggregate completion / accuracy / streak insights over recent plans."""
+    from backend.services import study_plan_service
+    return study_plan_service.insights(db, user_id=user.id, days=days)
+
+
+# ── Admin: provider metrics (LLM + dict provider observability) ──────────────
+
+@app.get("/admin/metrics")
+async def admin_provider_metrics(admin: User = Depends(get_admin_user)):
+    """In-process provider call counters (latency, success rate, tokens).
+
+    The counters reset on process restart. Useful for spotting a provider
+    that's flapping (high p95 latency, rising failure rate) without standing
+    up Prometheus.
+    """
+    from backend.utils import metrics
+    from backend.services import dict_cache
+    return {
+        "providers": metrics.snapshot(),
+        "dict_cache": {
+            **dict_cache.stats(),
+            "memory": dict_cache.memory_stats(),
+        },
+    }
+
+
+@app.post("/admin/metrics/reset")
+async def admin_reset_metrics(
+    provider: Optional[str] = Query(None, description="Reset just one provider's counters"),
+    admin: User = Depends(get_admin_user),
+):
+    from backend.utils import metrics
+    n = metrics.reset_provider(provider)
+    return {"ok": True, "reset": n, "scope": provider or "all"}
 
 
 # ── Admin panel SPA ───────────────────────────────────────────────────────────

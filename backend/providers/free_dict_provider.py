@@ -31,11 +31,17 @@ class FreeDictProvider(HttpDictProviderBase):
         word: str,
     ) -> Optional[CachedDefinition]:
         url = _BASE_URL.format(word=word)
-        resp = await client.get(url)
+        resp = await client.get(url, timeout=self.timeout_seconds)
         if resp.status_code == 404:
             return None
         resp.raise_for_status()
-        data = resp.json()
+        try:
+            data = resp.json()
+        except ValueError as exc:
+            # Free dictionary occasionally returns an HTML error page even on a
+            # 200 response. Treat as a miss rather than crashing the batch.
+            logger.debug("free_dict returned non-JSON for '%s': %s", word, exc)
+            return None
         return _parse(word, data)
 
 

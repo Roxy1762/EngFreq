@@ -14,13 +14,49 @@ from typing import Any, Optional
 logger = logging.getLogger(__name__)
 
 _FENCE_RE = re.compile(r"```(?:json)?\s*(.*?)```", re.DOTALL | re.IGNORECASE)
-_ARRAY_RE = re.compile(r"\[.*\]", re.DOTALL)
-_OBJECT_RE = re.compile(r"\{.*\}", re.DOTALL)
 
 
 def _strip_fence(text: str) -> str:
     m = _FENCE_RE.search(text)
     return m.group(1).strip() if m else text.strip()
+
+
+def _balanced_slice(text: str, open_ch: str, close_ch: str) -> Optional[str]:
+    """Extract the first balanced ``open_ch``…``close_ch`` slice.
+
+    A greedy ``\\[.*\\]`` regex (the previous approach) captured everything
+    between the first ``[`` and the last ``]``, swallowing intervening prose
+    and confusing the JSON parser when the LLM wrote multiple blocks. This
+    helper walks the string once, respecting nested brackets and quoted
+    strings — so an LLM response with both a code-fenced array and a stray
+    bracket later in the prose still parses cleanly.
+    """
+    start = text.find(open_ch)
+    if start < 0:
+        return None
+    depth = 0
+    in_str = False
+    escape = False
+    for i in range(start, len(text)):
+        ch = text[i]
+        if in_str:
+            if escape:
+                escape = False
+            elif ch == "\\":
+                escape = True
+            elif ch == '"':
+                in_str = False
+            continue
+        if ch == '"':
+            in_str = True
+            continue
+        if ch == open_ch:
+            depth += 1
+        elif ch == close_ch:
+            depth -= 1
+            if depth == 0:
+                return text[start : i + 1]
+    return None
 
 
 def parse_json(raw: str, *, prefer: str = "auto") -> Optional[Any]:
@@ -48,14 +84,16 @@ def parse_json(raw: str, *, prefer: str = "auto") -> Optional[Any]:
         except json.JSONDecodeError:
             continue
 
-    # Heuristic: find outermost [...] or {...}
-    patterns = (_ARRAY_RE, _OBJECT_RE) if prefer != "object" else (_OBJECT_RE, _ARRAY_RE)
-    for pattern in patterns:
-        m = pattern.search(raw)
-        if not m:
+    # Heuristic: pull the first balanced bracket pair. Try the preferred shape
+    # first, then the other. Walking once respects nested structures, so an
+    # array of objects parses correctly.
+    pairs = [("[", "]"), ("{", "}")] if prefer != "object" else [("{", "}"), ("[", "]")]
+    for open_ch, close_ch in pairs:
+        slice_ = _balanced_slice(raw, open_ch, close_ch)
+        if slice_ is None:
             continue
         try:
-            return json.loads(m.group(0))
+            return json.loads(slice_)
         except json.JSONDecodeError:
             continue
 

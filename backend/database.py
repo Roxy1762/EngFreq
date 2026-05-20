@@ -183,6 +183,123 @@ class ReviewEvent(Base):
     )
 
 
+class CoachThread(Base):
+    """A multi-turn chat thread between a user and the AI vocabulary coach.
+
+    Each thread keeps an ordered list of CoachMessage rows. Threads scope
+    auto-context (saved library snapshot, recent quiz performance) so the
+    LLM doesn't re-read the user's whole library on every reply.
+    """
+    __tablename__ = "coach_threads"
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
+    title = Column(String(120), nullable=False, default="未命名对话")
+    provider = Column(String(32), nullable=True)        # e.g. claude | deepseek | openai
+    model = Column(String(64), nullable=True)
+    focus_words = Column(Text, nullable=True)           # JSON list of headwords the user is studying
+    pinned = Column(Boolean, nullable=False, default=False)
+    archived = Column(Boolean, nullable=False, default=False)
+    message_count = Column(Integer, nullable=False, default=0)
+    total_input_tokens = Column(Integer, nullable=False, default=0)
+    total_output_tokens = Column(Integer, nullable=False, default=0)
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+    updated_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
+
+    __table_args__ = (
+        Index("ix_coach_threads_user_updated", "user_id", "updated_at"),
+    )
+
+
+class CoachMessage(Base):
+    """A single message in a CoachThread.
+
+    ``role`` matches the OpenAI / Anthropic convention: ``user`` /
+    ``assistant`` / ``system``. We log token usage per message so an admin
+    can see which threads burnt the most budget.
+    """
+    __tablename__ = "coach_messages"
+
+    id = Column(Integer, primary_key=True, index=True)
+    thread_id = Column(Integer, ForeignKey("coach_threads.id"), nullable=False, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
+    role = Column(String(16), nullable=False)                # user | assistant | system
+    content = Column(Text, nullable=False)
+    provider = Column(String(32), nullable=True)             # for assistant messages
+    model = Column(String(64), nullable=True)
+    input_tokens = Column(Integer, nullable=False, default=0)
+    output_tokens = Column(Integer, nullable=False, default=0)
+    latency_ms = Column(Integer, nullable=False, default=0)
+    error = Column(Text, nullable=True)                       # captured assistant errors
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), index=True)
+
+    __table_args__ = (
+        Index("ix_coach_messages_thread_created", "thread_id", "created_at"),
+    )
+
+
+class StudyPlan(Base):
+    """A single day's adaptive study plan for one user.
+
+    Generated lazily on first request per day. Contains an immutable list of
+    items (review queue + new gap suggestions + an optional quiz) so reloading
+    on a different device returns the same plan rather than re-shuffling.
+    """
+    __tablename__ = "study_plans"
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
+    plan_date = Column(String(10), nullable=False, index=True)   # ISO YYYY-MM-DD
+    review_target = Column(Integer, nullable=False, default=0)
+    learn_target = Column(Integer, nullable=False, default=0)
+    quiz_target = Column(Integer, nullable=False, default=0)
+    completed_review = Column(Integer, nullable=False, default=0)
+    completed_learn = Column(Integer, nullable=False, default=0)
+    completed_quiz = Column(Integer, nullable=False, default=0)
+    accuracy_pct = Column(String(8), nullable=True)         # rolling accuracy snapshot
+    streak_at_creation = Column(Integer, nullable=False, default=0)
+    insights_json = Column(Text, nullable=True)             # JSON: weak_levels, momentum, etc
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+    updated_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
+
+    items = relationship(
+        "StudyPlanItem",
+        back_populates="plan",
+        cascade="all, delete-orphan",
+        order_by="StudyPlanItem.position",
+    )
+
+    __table_args__ = (
+        Index("ix_study_plans_user_date", "user_id", "plan_date", unique=True),
+    )
+
+
+class StudyPlanItem(Base):
+    """One word (or quiz placeholder) in a StudyPlan."""
+    __tablename__ = "study_plan_items"
+
+    id = Column(Integer, primary_key=True, index=True)
+    plan_id = Column(Integer, ForeignKey("study_plans.id"), nullable=False, index=True)
+    headword = Column(String(64), nullable=False)
+    lemma = Column(String(64), nullable=True)
+    kind = Column(String(16), nullable=False)                # review | learn | quiz
+    source = Column(String(16), nullable=True)               # library | gap | review
+    word_level = Column(String(16), nullable=True)
+    cefr_level = Column(String(8), nullable=True)
+    chinese_meaning = Column(Text, nullable=True)
+    english_definition = Column(Text, nullable=True)
+    example_sentence = Column(Text, nullable=True)
+    position = Column(Integer, nullable=False, default=0)
+    completed = Column(Boolean, nullable=False, default=False)
+    completed_at = Column(DateTime, nullable=True)
+
+    plan = relationship("StudyPlan", back_populates="items")
+
+    __table_args__ = (
+        Index("ix_study_plan_items_plan_position", "plan_id", "position"),
+    )
+
+
 def get_db():
     """FastAPI dependency: yield a DB session, close on exit."""
     db = SessionLocal()
@@ -231,6 +348,7 @@ def _ensure_schema_columns() -> None:
 # strings.
 _ALLOWED_TABLES: frozenset[str] = frozenset({
     "exams", "users", "dicts", "app_settings", "library_words", "review_items",
+    "review_events", "coach_threads", "coach_messages", "study_plans", "study_plan_items",
 })
 _ALLOWED_COLUMN_DEFINITIONS: frozenset[str] = frozenset({
     "TEXT", "TEXT NOT NULL", "TEXT NOT NULL DEFAULT 'local'",

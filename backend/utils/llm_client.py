@@ -92,21 +92,33 @@ async def chat(
     else:
         raise ValueError(f"Unknown LLM provider: {provider!r}")
 
+    from backend.utils.metrics import record_provider_call
+
     t0 = time.monotonic()
-    response = await call_with_retry(
-        fn,
-        model=model,
-        system=system,
-        user=user,
-        max_tokens=max_tokens,
-        temperature=temperature,
-        use_prompt_cache=use_prompt_cache,
-        json_mode=json_mode,
-        provider=provider,
-        policy=policy,
-        label=log_label,
-    )
+    try:
+        response = await call_with_retry(
+            fn,
+            model=model,
+            system=system,
+            user=user,
+            max_tokens=max_tokens,
+            temperature=temperature,
+            use_prompt_cache=use_prompt_cache,
+            json_mode=json_mode,
+            provider=provider,
+            policy=policy,
+            label=log_label,
+        )
+    except Exception as exc:
+        elapsed = int((time.monotonic() - t0) * 1000)
+        record_provider_call(provider, ok=False, latency_ms=elapsed, error=str(exc)[:200])
+        raise
     response.latency_ms = int((time.monotonic() - t0) * 1000)
+    record_provider_call(
+        provider, ok=True, latency_ms=response.latency_ms,
+        input_tokens=response.input_tokens or 0,
+        output_tokens=response.output_tokens or 0,
+    )
     logger.info("%s ok (%s)", log_label, response.usage_summary)
     return response
 
@@ -128,8 +140,6 @@ async def _call_claude(
     if not llm.anthropic_api_key:
         raise RuntimeError("ANTHROPIC_API_KEY not configured")
 
-    client = anthropic.AsyncAnthropic(api_key=llm.anthropic_api_key)
-
     # Build system param: plain string or cacheable content block
     profile = get_profile(model)
     system_param: Any = system
@@ -140,15 +150,29 @@ async def _call_claude(
             "cache_control": {"type": "ephemeral"},
         }]
 
-    resp = await client.messages.create(
-        model=model,
-        max_tokens=max_tokens,
-        temperature=temperature,
-        system=system_param,
-        messages=[{"role": "user", "content": user}],
-    )
+    # Use `async with` so the underlying httpx connection pool is closed on
+    # both success and exception. Previously the client was leaked on every
+    # failure path — a long-running worker accumulated thousands of half-open
+    # connections, eventually hitting the OS file-descriptor cap.
+    async with anthropic.AsyncAnthropic(api_key=llm.anthropic_api_key) as client:
+        resp = await client.messages.create(
+            model=model,
+            max_tokens=max_tokens,
+            temperature=temperature,
+            system=system_param,
+            messages=[{"role": "user", "content": user}],
+        )
 
-    text = resp.content[0].text if resp.content else ""
+    # Concatenate all text blocks rather than indexing the first one — when the
+    # model returns multiple content blocks (e.g. tool_use + text) reading
+    # `content[0].text` either crashes (no `.text` attr on a non-text block)
+    # or drops payload.
+    text_parts: list[str] = []
+    for block in (resp.content or []):
+        piece = getattr(block, "text", None)
+        if isinstance(piece, str) and piece:
+            text_parts.append(piece)
+    text = "".join(text_parts)
     usage = getattr(resp, "usage", None)
     return LLMResponse(
         text=text.strip(),
@@ -183,15 +207,14 @@ async def _call_openai_compatible(
         base_url = llm.deepseek_base_url
         if not api_key:
             raise RuntimeError("DEEPSEEK_API_KEY not configured")
-        client = AsyncOpenAI(api_key=api_key, base_url=base_url)
+        client_kwargs: dict = {"api_key": api_key, "base_url": base_url}
     else:
         api_key = llm.openai_api_key
         if not api_key:
             raise RuntimeError("OPENAI_API_KEY not configured")
-        kwargs: dict = {"api_key": api_key}
+        client_kwargs = {"api_key": api_key}
         if llm.openai_base_url:
-            kwargs["base_url"] = llm.openai_base_url
-        client = AsyncOpenAI(**kwargs)
+            client_kwargs["base_url"] = llm.openai_base_url
 
     call_kwargs: dict = {
         "model": model,
@@ -205,7 +228,10 @@ async def _call_openai_compatible(
     if json_mode and get_profile(model).supports_json_mode:
         call_kwargs["response_format"] = {"type": "json_object"}
 
-    resp = await client.chat.completions.create(**call_kwargs)
+    # Async context manager guarantees the underlying httpx client is closed
+    # even if the upstream API hangs and the request is cancelled.
+    async with AsyncOpenAI(**client_kwargs) as client:
+        resp = await client.chat.completions.create(**call_kwargs)
 
     choice = resp.choices[0] if resp.choices else None
     text = choice.message.content if choice and choice.message else ""

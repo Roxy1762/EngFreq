@@ -22,8 +22,9 @@ import os
 import sqlite3
 import threading
 import time
+from collections import OrderedDict
 from dataclasses import dataclass, field
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Tuple
 
 from backend.config import settings
 
@@ -32,6 +33,28 @@ logger = logging.getLogger(__name__)
 _DB_FILENAME = "dict_cache.db"
 _DEFAULT_TTL_SECONDS = 60 * 60 * 24 * 30   # 30 days
 _DEFAULT_MAX_ROWS = 50_000
+
+# In-memory LRU front cache. Hot words (e.g. "the", "and", or whatever the
+# user looks up repeatedly during a session) used to hit SQLite on every
+# request — this layer collapses them to a dict lookup.
+_MEMORY_CACHE_SIZE = 2048
+_memory_cache: "OrderedDict[Tuple[str, str], Tuple[float, CachedDefinition]]" = OrderedDict()
+_memory_lock = threading.RLock()
+
+# Negative cache: words we've already determined the upstream API doesn't
+# know. Short TTL so we don't re-spam the API for the same misses, but not
+# permanent because some providers (especially iCIBA) occasionally return
+# transient failures we don't want to remember forever.
+_NEGATIVE_TTL_SECONDS = 60 * 60 * 6   # 6 hours
+_NEGATIVE_CACHE_SIZE = 4096
+_negative_cache: "OrderedDict[Tuple[str, str], float]" = OrderedDict()
+
+
+# Track on-disk row count in process so we don't run SELECT COUNT(*) on every
+# put() call. Initialised lazily on first access; falls back to a re-count
+# when the cache is cleared from another path.
+_row_count: Optional[int] = None
+_row_count_lock = threading.RLock()
 
 
 # ── Cached dictionary fields ──────────────────────────────────────────────────
@@ -122,12 +145,84 @@ def _normalize_key(source: str, word: str) -> tuple[str, str]:
     return source.strip().lower(), word.strip().lower()
 
 
+def _memory_get(key: Tuple[str, str], ttl_seconds: int) -> Optional[CachedDefinition]:
+    with _memory_lock:
+        entry = _memory_cache.get(key)
+        if entry is None:
+            return None
+        stored_at, cached = entry
+        if ttl_seconds and (time.time() - stored_at) > ttl_seconds:
+            _memory_cache.pop(key, None)
+            return None
+        _memory_cache.move_to_end(key)
+        return cached
+
+
+def _memory_put(key: Tuple[str, str], stored_at: float, cached: CachedDefinition) -> None:
+    with _memory_lock:
+        _memory_cache[key] = (stored_at, cached)
+        _memory_cache.move_to_end(key)
+        while len(_memory_cache) > _MEMORY_CACHE_SIZE:
+            _memory_cache.popitem(last=False)
+
+
+def _memory_drop(key: Tuple[str, str]) -> None:
+    with _memory_lock:
+        _memory_cache.pop(key, None)
+
+
+def _negative_hit(key: Tuple[str, str]) -> bool:
+    with _memory_lock:
+        ts = _negative_cache.get(key)
+        if ts is None:
+            return False
+        if time.time() - ts > _NEGATIVE_TTL_SECONDS:
+            _negative_cache.pop(key, None)
+            return False
+        _negative_cache.move_to_end(key)
+        return True
+
+
+def _negative_mark(key: Tuple[str, str]) -> None:
+    with _memory_lock:
+        _negative_cache[key] = time.time()
+        _negative_cache.move_to_end(key)
+        while len(_negative_cache) > _NEGATIVE_CACHE_SIZE:
+            _negative_cache.popitem(last=False)
+
+
+def is_known_miss(source: str, word: str) -> bool:
+    """True if we've recently determined this (source, word) returns no data.
+
+    Used by HTTP providers to skip the network round-trip for words the API
+    has already 404ed on in the recent past. Decays after a short TTL so
+    transient failures don't lock us out of a fix.
+    """
+    if not source or not word:
+        return False
+    return _negative_hit(_normalize_key(source, word))
+
+
+def mark_miss(source: str, word: str) -> None:
+    """Remember that this (source, word) returned no data."""
+    if not source or not word:
+        return
+    _negative_mark(_normalize_key(source, word))
+
+
 # ── Public API ────────────────────────────────────────────────────────────────
 
 def get(source: str, word: str, *, ttl_seconds: int = _DEFAULT_TTL_SECONDS) -> Optional[CachedDefinition]:
     if not source or not word:
         return None
-    src, w = _normalize_key(source, word)
+    key = _normalize_key(source, word)
+
+    # In-memory layer first — avoids the SQLite trip entirely for hot lookups.
+    cached_mem = _memory_get(key, ttl_seconds)
+    if cached_mem is not None:
+        return cached_mem
+
+    src, w = key
     now = time.time()
     with _lock:
         conn = _connect()
@@ -142,6 +237,7 @@ def get(source: str, word: str, *, ttl_seconds: int = _DEFAULT_TTL_SECONDS) -> O
             if ttl_seconds and (now - float(row["stored_at"])) > ttl_seconds:
                 conn.execute("DELETE FROM dict_cache WHERE source = ? AND word = ?", (src, w))
                 conn.commit()
+                _adjust_row_count(-1)
                 return None
             try:
                 cached = CachedDefinition.from_json(row["payload_json"])
@@ -149,12 +245,14 @@ def get(source: str, word: str, *, ttl_seconds: int = _DEFAULT_TTL_SECONDS) -> O
                 logger.debug("dict_cache: corrupt row for %s/%s — %s", src, w, exc)
                 conn.execute("DELETE FROM dict_cache WHERE source = ? AND word = ?", (src, w))
                 conn.commit()
+                _adjust_row_count(-1)
                 return None
             conn.execute(
                 "UPDATE dict_cache SET last_used_at = ? WHERE source = ? AND word = ?",
                 (now, src, w),
             )
             conn.commit()
+            _memory_put(key, float(row["stored_at"]), cached)
             return cached
         finally:
             conn.close()
@@ -166,13 +264,18 @@ def put(source: str, word: str, definition: CachedDefinition) -> None:
     if not (definition.english_definition or definition.chinese_meaning or definition.example_sentence):
         # Don't cache empty results — would mask transient API failures.
         return
-    src, w = _normalize_key(source, word)
+    key = _normalize_key(source, word)
+    src, w = key
     now = time.time()
     payload = definition.to_json()
     with _lock:
         conn = _connect()
         try:
             _ensure_schema(conn)
+            existed = conn.execute(
+                "SELECT 1 FROM dict_cache WHERE source = ? AND word = ?",
+                (src, w),
+            ).fetchone() is not None
             conn.execute(
                 """
                 INSERT INTO dict_cache (source, word, payload_json, stored_at, last_used_at)
@@ -185,25 +288,61 @@ def put(source: str, word: str, definition: CachedDefinition) -> None:
                 (src, w, payload, now, now),
             )
             conn.commit()
-            _maybe_evict(conn)
+            if not existed:
+                _adjust_row_count(+1)
+                _maybe_evict(conn)
+            _memory_put(key, now, definition)
         finally:
             conn.close()
 
 
+def _current_row_count(conn: sqlite3.Connection) -> int:
+    global _row_count
+    with _row_count_lock:
+        if _row_count is None:
+            _row_count = int(conn.execute("SELECT COUNT(*) FROM dict_cache").fetchone()[0] or 0)
+        return _row_count
+
+
+def _adjust_row_count(delta: int) -> None:
+    global _row_count
+    with _row_count_lock:
+        if _row_count is None:
+            return   # not initialised yet; next access will count fresh
+        _row_count = max(0, _row_count + delta)
+
+
+def _reset_row_count() -> None:
+    global _row_count
+    with _row_count_lock:
+        _row_count = None
+
+
 def _maybe_evict(conn: sqlite3.Connection, max_rows: int = _DEFAULT_MAX_ROWS) -> None:
-    count = conn.execute("SELECT COUNT(*) FROM dict_cache").fetchone()[0]
+    """Evict LRU entries when the in-process count exceeds the cap.
+
+    The previous version ran SELECT COUNT(*) on every put() — O(n) per insert
+    when the table reaches significant size. The in-process counter keeps the
+    common path O(1); we only run the eviction DELETE when we cross the cap,
+    and prune in larger batches (10% headroom) so the next 5000 inserts don't
+    re-trigger eviction.
+    """
+    count = _current_row_count(conn)
     if count <= max_rows:
         return
-    excess = count - max_rows
-    conn.execute(
+    # Prune to 90% of the cap so we don't churn on every following insert.
+    target = int(max_rows * 0.9)
+    excess = max(1, count - target)
+    deleted = conn.execute(
         """
         DELETE FROM dict_cache WHERE rowid IN (
             SELECT rowid FROM dict_cache ORDER BY last_used_at ASC LIMIT ?
         )
         """,
         (excess,),
-    )
+    ).rowcount or 0
     conn.commit()
+    _adjust_row_count(-int(deleted))
 
 
 def stats() -> Dict[str, Any]:
@@ -231,10 +370,34 @@ def clear(source: Optional[str] = None) -> int:
         try:
             _ensure_schema(conn)
             if source:
-                cur = conn.execute("DELETE FROM dict_cache WHERE source = ?", (source.strip().lower(),))
+                src = source.strip().lower()
+                cur = conn.execute("DELETE FROM dict_cache WHERE source = ?", (src,))
+                # Drop matching in-memory entries for this source
+                with _memory_lock:
+                    for key in list(_memory_cache.keys()):
+                        if key[0] == src:
+                            _memory_cache.pop(key, None)
+                    for key in list(_negative_cache.keys()):
+                        if key[0] == src:
+                            _negative_cache.pop(key, None)
             else:
                 cur = conn.execute("DELETE FROM dict_cache")
+                with _memory_lock:
+                    _memory_cache.clear()
+                    _negative_cache.clear()
             conn.commit()
+            _reset_row_count()
             return cur.rowcount or 0
         finally:
             conn.close()
+
+
+def memory_stats() -> Dict[str, Any]:
+    """Snapshot of the in-memory layer — for diagnostics."""
+    with _memory_lock:
+        return {
+            "lru_size": len(_memory_cache),
+            "lru_capacity": _MEMORY_CACHE_SIZE,
+            "negative_size": len(_negative_cache),
+            "negative_capacity": _NEGATIVE_CACHE_SIZE,
+        }

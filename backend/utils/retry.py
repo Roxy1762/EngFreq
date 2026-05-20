@@ -28,6 +28,22 @@ class RetryPolicy:
     backoff_factor: float = 2.0
     jitter: float = 0.25   # +/- fraction randomized
 
+    def __post_init__(self) -> None:
+        # Validate at construction time so a mis-configured policy fails fast
+        # rather than at the bottom of the retry loop where the error is far
+        # from the caller. The previous `assert last_exc is not None` after
+        # the loop relied on max_attempts > 0 silently.
+        if self.max_attempts < 1:
+            raise ValueError("max_attempts must be >= 1")
+        if self.initial_delay < 0:
+            raise ValueError("initial_delay must be >= 0")
+        if self.max_delay < self.initial_delay:
+            raise ValueError("max_delay must be >= initial_delay")
+        if self.backoff_factor < 1.0:
+            raise ValueError("backoff_factor must be >= 1.0")
+        if not (0.0 <= self.jitter <= 1.0):
+            raise ValueError("jitter must be in [0.0, 1.0]")
+
 
 # Errors we consider transient (retryable) — string match against repr(exc).
 # Kept as strings to avoid importing anthropic / openai at this layer.
@@ -96,8 +112,10 @@ async def call_with_retry(
             )
             await asyncio.sleep(delay)
 
-    assert last_exc is not None  # pragma: no cover
-    raise last_exc
+    # `RetryPolicy.__post_init__` guarantees max_attempts >= 1, so the loop
+    # always sets last_exc on the failure path. This branch is unreachable in
+    # normal operation; raise a defensive RuntimeError if we ever land here.
+    raise last_exc if last_exc is not None else RuntimeError(f"{label}: retry loop exited without result")
 
 
 def with_retry(

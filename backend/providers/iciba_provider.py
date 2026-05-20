@@ -51,11 +51,18 @@ class ICIBAProvider(HttpDictProviderBase):
                 "client": "6", "word": word, "uid": "0", "type": "json",
                 "key": "1000006",
             }
-            resp = await client.get(_ICIBA_DICT_API, params=params, headers=_HEADERS)
+            resp = await client.get(
+                _ICIBA_DICT_API,
+                params=params,
+                headers=_HEADERS,
+                timeout=self.timeout_seconds,
+            )
             if resp.status_code == 200:
-                cached = self._parse_dict_response(word, resp.json())
-                if cached:
-                    return cached
+                payload = _safe_json(resp, word=word, endpoint="dict")
+                if payload is not None:
+                    cached = self._parse_dict_response(word, payload)
+                    if cached:
+                        return cached
         except Exception as exc:   # noqa: BLE001
             logger.debug("iciba dict endpoint failed for '%s': %s", word, exc)
 
@@ -65,9 +72,17 @@ class ICIBAProvider(HttpDictProviderBase):
                 "c": "word", "m": "getsuggest", "nums": "1",
                 "client": "6", "is_need_mean": "1", "word": word,
             }
-            resp = await client.get(_ICIBA_API, params=params, headers=_HEADERS)
+            resp = await client.get(
+                _ICIBA_API,
+                params=params,
+                headers=_HEADERS,
+                timeout=self.timeout_seconds,
+            )
             resp.raise_for_status()
-            return self._parse_suggest_response(word, resp.json())
+            payload = _safe_json(resp, word=word, endpoint="suggest")
+            if payload is None:
+                return None
+            return self._parse_suggest_response(word, payload)
         except Exception as exc:   # noqa: BLE001
             logger.debug("iciba suggest failed for '%s': %s", word, exc)
             return None
@@ -139,6 +154,24 @@ class ICIBAProvider(HttpDictProviderBase):
         # Strip HTML tags + collapse whitespace.
         text = re.sub(r"<[^>]+>", "", value or "")
         return re.sub(r"\s+", " ", text).strip()
+
+
+def _safe_json(resp: httpx.Response, *, word: str, endpoint: str) -> Optional[dict]:
+    """Decode ``resp.json()`` without crashing the provider on bad payloads.
+
+    iCIBA occasionally serves an HTML interstitial (rate-limit page, captcha)
+    that bypasses Content-Type and breaks ``resp.json()`` with a JSONDecodeError.
+    Surfacing that as an exception leaves the asyncio semaphore acquired and
+    blocks subsequent words; converting to ``None`` keeps the pipeline moving.
+    """
+    try:
+        return resp.json()
+    except ValueError as exc:
+        logger.debug(
+            "iciba %s endpoint returned non-JSON for '%s' (%d bytes): %s",
+            endpoint, word, len(resp.content or b""), exc,
+        )
+        return None
 
 
 def _normalize_pos(raw: str) -> str:

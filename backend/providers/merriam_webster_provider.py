@@ -40,7 +40,11 @@ class MerriamWebsterProvider(HttpDictProviderBase):
     timeout_seconds = 10.0
 
     def __init__(self):
-        if not _get_mw_key():
+        # Resolve the API key once at construction. Previously every word
+        # lookup re-fetched the runtime config (a SQLite read per word) just
+        # to pull the key — that was the slowest part of a 50-word batch.
+        self._api_key = _get_mw_key()
+        if not self._api_key:
             raise RuntimeError(
                 "Merriam-Webster API key not configured. "
                 "Set it in the admin panel under '词典工具密钥' or via MERRIAM_WEBSTER_KEY in .env"
@@ -52,9 +56,23 @@ class MerriamWebsterProvider(HttpDictProviderBase):
         word: str,
     ) -> Optional[CachedDefinition]:
         url = _BASE_URL.format(word=word)
-        resp = await client.get(url, params={"key": _get_mw_key()})
+        # Pass timeout explicitly: httpx's per-call timeout overrides the
+        # client default. Some MW responses for rare words have been observed
+        # to take 30+ seconds — without an explicit per-call timeout the
+        # request inherits whatever the client default is at call time, which
+        # changed between httpx versions.
+        resp = await client.get(
+            url,
+            params={"key": self._api_key},
+            timeout=self.timeout_seconds,
+        )
         resp.raise_for_status()
-        data = resp.json()
+        # Some MW errors return HTML for invalid keys; tolerate that.
+        try:
+            data = resp.json()
+        except ValueError as exc:
+            logger.warning("Merriam-Webster returned non-JSON for '%s': %s", word, exc)
+            return None
         return _parse(word, data)
 
 
