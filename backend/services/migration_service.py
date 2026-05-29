@@ -345,9 +345,6 @@ def export_snapshot(
             notes=opts.notes,
         )
 
-        # Build the manifest *first* so per-tree checksums can be filled in
-        # before we write it. We do this by scanning each tree to compute the
-        # paths + hashes, then add everything to the zip in one pass.
         per_tree: list[tuple[Path, str]] = []  # (src_dir, arc_root)
         if opts.include_file_store:
             per_tree.append((Path(settings.file_store_dir), "data/files"))
@@ -356,16 +353,28 @@ def export_snapshot(
         if opts.include_ocr_cache:
             per_tree.append((Path(settings.ocr_cache_dir), "data/ocr_cache"))
 
-        for src, arc_root in per_tree:
-            for src_path, arc_name in _walk_tree_for_zip(src, arc_root):
-                manifest.checksums[arc_name] = _sha256_file(src_path)
-
+        # Hash the *exact bytes we archive*, in a single pass per file, and write
+        # the manifest LAST. The old code walked each tree twice — once to hash,
+        # once to zf.write() — so a file that a live request handler rewrote (or
+        # deleted) between the two passes produced a bundle whose contents no
+        # longer matched manifest.checksums, which the importer then rejected as
+        # "corrupt". Reading each file once and writing those same bytes keeps
+        # the archive self-consistent. Import reads members by name, so manifest
+        # position within the zip is irrelevant.
         with _open_zipfile(staging, compression=opts.compression) as zf:
-            zf.writestr("manifest.json", manifest.to_json_bytes())
             zf.write(tmp_db, "db/app.db")
             for src, arc_root in per_tree:
                 for src_path, arc_name in _walk_tree_for_zip(src, arc_root):
-                    zf.write(src_path, arc_name)
+                    try:
+                        data = src_path.read_bytes()
+                    except (FileNotFoundError, PermissionError) as exc:
+                        # Vanished/locked between the walk and the read — skip it
+                        # rather than abort the whole export of a live server.
+                        logger.warning("Skipping %s during export: %s", src_path, exc)
+                        continue
+                    manifest.checksums[arc_name] = hashlib.sha256(data).hexdigest()
+                    zf.writestr(arc_name, data)
+            zf.writestr("manifest.json", manifest.to_json_bytes())
 
     os.replace(staging, output_path)
     logger.info("Migration bundle written: %s (size=%d)", output_path, output_path.stat().st_size)
@@ -546,7 +555,9 @@ def _do_import(zip_path: Path, opts: ImportOptions) -> ImportReport:
                 report.actions.append("dry_run_validated_only")
                 return report
 
-            # Safety snapshot
+            # Safety snapshot. If the operator asked for one and we *cannot*
+            # produce it, abort BEFORE any destructive change — proceeding would
+            # leave no rollback point, defeating the entire purpose of the flag.
             if opts.make_safety_backup:
                 BACKUP_DIR.mkdir(parents=True, exist_ok=True)
                 safety_path = BACKUP_DIR / f"{BACKUP_PREFIX_PRE_IMPORT}{datetime.now().strftime('%Y%m%d-%H%M%S')}.zip"
@@ -564,42 +575,61 @@ def _do_import(zip_path: Path, opts: ImportOptions) -> ImportReport:
                     report.safety_backup_path = str(safety_path)
                     report.actions.append(f"safety_backup={safety_path.name}")
                 except Exception as exc:  # noqa: BLE001
-                    report.warnings.append(f"Safety backup failed: {exc}")
+                    raise RuntimeError(
+                        f"Aborting import: required safety backup failed ({exc}). "
+                        f"No changes were applied."
+                    ) from exc
 
-            # Apply DB
-            _restore_sqlite(db_member, _resolve_db_path())
-            init_db()  # re-runs lightweight schema migrations against the restored DB
-            report.actions.append("db_restored")
+            # Destructive section. If anything fails after the DB has been
+            # swapped, automatically roll back to the safety snapshot so the
+            # server is never left half-migrated.
+            db_restored = False
+            try:
+                _restore_sqlite(db_member, _resolve_db_path())
+                init_db()  # re-runs lightweight schema migrations against the restored DB
+                db_restored = True
+                report.actions.append("db_restored")
 
-            # Apply data directories
-            includes = manifest.includes or {}
-            if includes.get("file_store"):
-                _restore_dir(
-                    extract_root / "data" / "files",
-                    Path(settings.file_store_dir),
-                    replace=opts.replace_file_store,
-                )
-                report.actions.append(
-                    f"file_store_{'replaced' if opts.replace_file_store else 'merged'}"
-                )
-            if includes.get("wordlists"):
-                _restore_dir(
-                    extract_root / "data" / "wordlists",
-                    _wordlists_dir(),
-                    replace=opts.replace_wordlists,
-                )
-                report.actions.append(
-                    f"wordlists_{'replaced' if opts.replace_wordlists else 'merged'}"
-                )
-            if includes.get("ocr_cache"):
-                _restore_dir(
-                    extract_root / "data" / "ocr_cache",
-                    Path(settings.ocr_cache_dir),
-                    replace=opts.replace_ocr_cache,
-                )
-                report.actions.append(
-                    f"ocr_cache_{'replaced' if opts.replace_ocr_cache else 'merged'}"
-                )
+                includes = manifest.includes or {}
+                if includes.get("file_store"):
+                    _restore_dir(
+                        extract_root / "data" / "files",
+                        Path(settings.file_store_dir),
+                        replace=opts.replace_file_store,
+                    )
+                    report.actions.append(
+                        f"file_store_{'replaced' if opts.replace_file_store else 'merged'}"
+                    )
+                if includes.get("wordlists"):
+                    _restore_dir(
+                        extract_root / "data" / "wordlists",
+                        _wordlists_dir(),
+                        replace=opts.replace_wordlists,
+                    )
+                    report.actions.append(
+                        f"wordlists_{'replaced' if opts.replace_wordlists else 'merged'}"
+                    )
+                if includes.get("ocr_cache"):
+                    _restore_dir(
+                        extract_root / "data" / "ocr_cache",
+                        Path(settings.ocr_cache_dir),
+                        replace=opts.replace_ocr_cache,
+                    )
+                    report.actions.append(
+                        f"ocr_cache_{'replaced' if opts.replace_ocr_cache else 'merged'}"
+                    )
+            except Exception as exc:  # noqa: BLE001
+                if db_restored and report.safety_backup_path:
+                    try:
+                        _emergency_rollback(Path(report.safety_backup_path))
+                        report.actions.append("rolled_back_to_safety_backup")
+                    except Exception:  # noqa: BLE001
+                        logger.exception("Emergency rollback FAILED after partial import")
+                        report.warnings.append(
+                            "Partial import AND rollback both failed — restore "
+                            f"manually from {report.safety_backup_path}"
+                        )
+                raise RuntimeError(f"Import failed mid-apply: {exc}") from exc
 
         report.ok = True
         return report
@@ -748,6 +778,33 @@ def _restore_dir(src: Path, dst: Path, *, replace: bool, max_workers: int = 4) -
         # surface any exception
         for fut in as_completed(futures):
             fut.result()
+
+
+def _emergency_rollback(safety_zip: Path) -> None:
+    """Best-effort restore of the pre-import safety snapshot after a partial
+    import failure. Replaces the DB and overlays the data directories captured
+    in the snapshot. Raised exceptions propagate to the caller for logging."""
+    with tempfile.TemporaryDirectory(prefix="engfreq-rollback-") as td:
+        root = Path(td)
+        with zipfile.ZipFile(safety_zip, "r") as zf:
+            for info in zf.infolist():
+                if info.is_dir():
+                    continue
+                dst = _safe_join(root, info.filename)
+                dst.parent.mkdir(parents=True, exist_ok=True)
+                with zf.open(info, "r") as src, dst.open("wb") as out:
+                    shutil.copyfileobj(src, out, length=_BUF)
+
+        db_member = root / "db" / "app.db"
+        if db_member.exists():
+            _restore_sqlite(db_member, _resolve_db_path())
+            init_db()
+        files_dir = root / "data" / "files"
+        if files_dir.exists():
+            _restore_dir(files_dir, Path(settings.file_store_dir), replace=True)
+        wl_dir = root / "data" / "wordlists"
+        if wl_dir.exists():
+            _restore_dir(wl_dir, _wordlists_dir(), replace=True)
 
 
 # ── Restore-from-local-backup (no upload roundtrip) ─────────────────────────

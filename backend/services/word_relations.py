@@ -22,9 +22,11 @@ dashboard to nudge users toward syllabus coverage.
 """
 from __future__ import annotations
 
+import bisect
 import logging
 from dataclasses import dataclass
-from typing import Any, Dict, Iterable, List, Optional
+from functools import lru_cache
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 from sqlalchemy.orm import Session
 
@@ -175,13 +177,41 @@ def _generate_family_candidates(word: str, *, vocabulary: Iterable[str]) -> List
     return out
 
 
+# Precomputed peer index: (zipf, word, cefr, family_id) for every gaokao word
+# with a known Zipf, sorted by Zipf. Built once (lru_cache maxsize=1) so peer
+# lookup can bisect the Zipf window instead of rescanning the whole ~3500-word
+# list on every call — which matters because study-plan generation calls the
+# peer path once per candidate word.
+_PeerRow = Tuple[float, str, str, Optional[str]]
+
+
+@lru_cache(maxsize=1)
+def _peer_index() -> List[_PeerRow]:
+    rows: list[_PeerRow] = []
+    for w in get_gaokao_words():
+        z = zipf_score(w)
+        if z == 0.0:
+            continue
+        rows.append((z, w, get_cefr_level(w), get_family_id(w)))
+    rows.sort(key=lambda r: r[0])
+    return rows
+
+
+@lru_cache(maxsize=1)
+def _peer_index_zipfs() -> List[float]:
+    return [r[0] for r in _peer_index()]
+
+
 def _peer_candidates_from_list(
-    word: str, *, vocabulary: Iterable[str], zipf_window: float = 0.5,
+    word: str, *, vocabulary: Optional[Iterable[str]] = None, zipf_window: float = 0.5,
     cefr_match: bool = True, limit: int = 12,
 ) -> List[str]:
-    """Pick words from `vocabulary` whose Zipf score is within ±`zipf_window`
-    of the target word and (optionally) match CEFR level. Sorted by closeness
-    of Zipf score so the most comparable peers come first.
+    """Pick gaokao words whose Zipf score is within ±`zipf_window` of the target
+    word and (optionally) match CEFR level. Sorted by closeness of Zipf so the
+    most comparable peers come first.
+
+    Uses the cached, Zipf-sorted :func:`_peer_index` and bisects the candidate
+    window — O(log n + window) instead of an O(n) scan of the full wordlist.
     """
     word = word.lower().strip()
     if not word:
@@ -194,16 +224,16 @@ def _peer_candidates_from_list(
     target_cefr = get_cefr_level(word) if cefr_match else None
     target_family = get_family_id(word)
 
+    index = _peer_index()
+    zipfs = _peer_index_zipfs()
+    lo = bisect.bisect_left(zipfs, target_zipf - zipf_window)
+    hi = bisect.bisect_right(zipfs, target_zipf + zipf_window)
+
     scored: list[tuple[float, str]] = []
-    for w in vocabulary:
-        if w == word or get_family_id(w) == target_family:
+    for z, w, cefr, fam in index[lo:hi]:
+        if w == word or fam == target_family:
             continue  # skip same-family — handled by family suggestions
-        z = zipf_score(w)
-        if z == 0.0:
-            continue
-        if abs(z - target_zipf) > zipf_window:
-            continue
-        if target_cefr and get_cefr_level(w) != target_cefr:
+        if target_cefr and cefr != target_cefr:
             continue
         # Closer Zipf = better peer. Tie-break by length similarity.
         score = abs(z - target_zipf) + abs(len(w) - len(word)) * 0.01
@@ -344,9 +374,7 @@ def related_for_word(
             total += len(sib_items)
 
     if include_peers:
-        peer_words = _peer_candidates_from_list(
-            word, vocabulary=get_gaokao_words(), limit=limit,
-        )
+        peer_words = _peer_candidates_from_list(word, limit=limit)
         peer_items = [
             RelatedWord(
                 word=w,

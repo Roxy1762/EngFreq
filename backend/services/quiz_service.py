@@ -71,6 +71,10 @@ class QuizQuestion:
     example: Optional[str] = None
     pos: Optional[str] = None
     word_level: Optional[str] = None
+    # Extra answers accepted for typed modes besides the headword — e.g. the
+    # inflected surface form actually masked in a fill-in-blank sentence
+    # ("running" when the headword is "run"). Never sent to the client.
+    accepted_answers: Optional[List[str]] = None
 
     def to_client(self) -> Dict[str, Any]:
         """Strip the answer key before sending to the client."""
@@ -254,24 +258,35 @@ def _make_definition_prompt(row: LibraryWord) -> str:
 _BLANK_TOKEN = "____"
 
 
-def _make_blank_example(row: LibraryWord) -> Optional[str]:
+def _make_blank_example(row: LibraryWord) -> Optional[Tuple[str, List[str]]]:
     """Replace every case-insensitive occurrence of the headword in the example
-    sentence with a blank token. Returns None if no replacement happened or no
-    example exists (in which case fill_in_blank is unsuitable for this word).
+    sentence with a blank token.
+
+    Returns ``(masked_sentence, surface_forms)`` where ``surface_forms`` are the
+    exact tokens that were blanked (e.g. ``["running"]`` for headword "run"), so
+    the grader can accept the contextually-correct inflection — not just the bare
+    headword. Returns None if no replacement happened or no example exists (in
+    which case fill_in_blank is unsuitable for this word).
     """
     example = (row.example_sentence or "").strip()
     if not example:
         return None
-    # Word-boundary regex so "import" doesn't match "important". We also strip
-    # trailing s/es/ed/ing inflection from the headword when looking for it.
+    # Word-boundary regex so "import" doesn't match "important". The trailing
+    # \w* also matches inflected forms (run → running) which we capture below.
     base = re.escape((row.headword or row.lemma or "").lower())
     if not base:
         return None
     pattern = re.compile(rf"\b{base}\w*\b", re.IGNORECASE)
-    new, n = pattern.subn(_BLANK_TOKEN, example)
+    surfaces: List[str] = []
+
+    def _repl(m: "re.Match[str]") -> str:
+        surfaces.append(m.group(0))
+        return _BLANK_TOKEN
+
+    new, n = pattern.subn(_repl, example)
     if n == 0:
         return None
-    return new
+    return new, surfaces
 
 
 # ── Question construction ───────────────────────────────────────────────────
@@ -343,14 +358,16 @@ def _build_question(
         )
 
     if mode == "fill_in_blank":
-        masked = _make_blank_example(row)
-        if not masked:
+        made = _make_blank_example(row)
+        if not made:
             return None
+        masked, surfaces = made
         return QuizQuestion(
             id=qid, mode=mode,
             prompt=masked,
             headword=row.headword, library_id=row.id,
             example=row.example_sentence, pos=row.pos, word_level=row.word_level,
+            accepted_answers=surfaces,
         )
 
     return None
@@ -589,11 +606,18 @@ def _grade_question(q: QuizQuestion, raw_answer: Any) -> bool:
             return _norm_answer(raw_answer) == _norm_answer(target)
         return False
 
-    # Typed answer — match against headword (with light normalisation).
+    # Typed answer — accept the headword or any masked surface form (so a
+    # contextually-correct inflection like "running" for headword "run" grades
+    # as correct), all with light normalisation.
     given = _norm_answer(str(raw_answer or ""))
     if not given:
         return False
-    return given == _norm_answer(q.headword)
+    accepted = {_norm_answer(q.headword)}
+    for alt in (q.accepted_answers or []):
+        norm = _norm_answer(alt)
+        if norm:
+            accepted.add(norm)
+    return given in accepted
 
 
 def _correct_answer_text(q: QuizQuestion) -> str:

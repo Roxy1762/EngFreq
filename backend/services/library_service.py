@@ -21,7 +21,7 @@ from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
-from sqlalchemy import case, func
+from sqlalchemy import case, func, or_
 from sqlalchemy.orm import Session
 
 from backend.database import Dict as DictModel
@@ -94,10 +94,12 @@ def list_library(
     return [_row_to_dict(row) for row in q.all()]
 
 
-def add_library_word(
+def _upsert_library_word(
     db: Session, *, user_id: int, payload: LibraryAddRequest,
 ) -> Tuple[LibraryWord, bool]:
-    """Insert a new library entry, or update the existing one if headword already saved."""
+    """Insert/update a library entry WITHOUT committing — the caller controls the
+    transaction boundary. Used directly by bulk importers so a multi-word import
+    is a single atomic commit instead of one commit (and one refresh) per word."""
     headword = payload.headword.strip()
     existing = (
         db.query(LibraryWord)
@@ -135,6 +137,14 @@ def add_library_word(
         existing.cefr_level = payload.cefr_level
     if payload.zipf_score is not None:
         existing.zipf_score = f"{payload.zipf_score:.2f}"
+    return existing, created
+
+
+def add_library_word(
+    db: Session, *, user_id: int, payload: LibraryAddRequest,
+) -> Tuple[LibraryWord, bool]:
+    """Insert a new library entry, or update the existing one if headword already saved."""
+    existing, created = _upsert_library_word(db, user_id=user_id, payload=payload)
     db.commit()
     db.refresh(existing)
     return existing, created
@@ -176,15 +186,28 @@ def bulk_set_mastered(
     ids = [int(i) for i in word_ids if i is not None]
     if not ids:
         return 0
+    # Resolve headwords up-front: review items can be linked to a library row by
+    # id *or* only by headword (library_word_id is nullable — enroll_many leaves
+    # it NULL when no library row matched at enroll time). Mastering must clear
+    # both kinds, otherwise an archived word keeps surfacing in the review queue.
+    headwords = [
+        row[0]
+        for row in db.query(LibraryWord.headword)
+        .filter(LibraryWord.user_id == user_id, LibraryWord.id.in_(ids))
+        .all()
+    ]
     updated = (
         db.query(LibraryWord)
         .filter(LibraryWord.user_id == user_id, LibraryWord.id.in_(ids))
         .update({LibraryWord.mastered: bool(mastered)}, synchronize_session=False)
     )
     if mastered and updated:
+        review_filter = ReviewItem.library_word_id.in_(ids)
+        if headwords:
+            review_filter = or_(review_filter, ReviewItem.headword.in_(headwords))
         db.query(ReviewItem).filter(
             ReviewItem.user_id == user_id,
-            ReviewItem.library_word_id.in_(ids),
+            review_filter,
         ).delete(synchronize_session=False)
     db.commit()
     return int(updated or 0)
@@ -308,11 +331,15 @@ def bulk_add_from_dict(
             cefr_level=item.get("cefr_level"),
             zipf_score=item.get("zipf_score"),
         )
-        _, was_created = add_library_word(db, user_id=user_id, payload=payload)
+        _, was_created = _upsert_library_word(db, user_id=user_id, payload=payload)
         if was_created:
             created += 1
         else:
             updated += 1
+    # Single commit for the whole import: atomic (a mid-import failure rolls the
+    # batch back instead of leaving a partial import) and far fewer round trips
+    # than committing per word. Autoflush keeps intra-batch dedup correct.
+    db.commit()
     return {"created": created, "updated": updated, "skipped": skipped}
 
 

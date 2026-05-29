@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import threading
 import time
-from typing import Any, Dict, Iterator, List, Optional
+from typing import Any, Callable, Dict, Iterator, List, Optional
 
 from backend.models.schemas import TaskStatus
 
@@ -56,6 +56,22 @@ class TaskStore:
             for key, value in kwargs.items():
                 setattr(task, key, value)
             self._touched[task_id] = time.time()
+
+    def mutate(self, task_id: str, fn: "Callable[[TaskStatus], Any]") -> Any:
+        """Run ``fn(task)`` while holding the lock, for atomic read-modify-write
+        of nested task state (e.g. ``task.result.vocab_table``). Mutating the
+        object returned by :meth:`get` directly races concurrent readers such as
+        the task-poll endpoint; route those updates through here instead.
+
+        Returns whatever ``fn`` returns, or ``None`` if the task is gone.
+        """
+        with self._lock:
+            task = self._tasks.get(task_id)
+            if task is None:
+                return None
+            result = fn(task)
+            self._touched[task_id] = time.time()
+            return result
 
     # ── Extracted text buffer (cleared on purge) ─────────────────────────────
     def set_text(self, task_id: str, text: str) -> None:
