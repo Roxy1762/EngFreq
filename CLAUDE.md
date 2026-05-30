@@ -73,7 +73,7 @@ Background task system queues analysis jobs asynchronously.
 - **[structure_recognizer.py](backend/services/structure_recognizer.py)** — Parse exam structure (identify question body, stems, options)
 - **[frequency_analyzer.py](backend/services/frequency_analyzer.py)** — Extract words, lemmatize (spaCy), weight by location, build frequency tables
 - **[vocabulary_generator.py](backend/services/vocabulary_generator.py)** — Select provider, enrich lemmas with definitions/examples, prioritize by rarity
-- **[export_service.py](backend/services/export_service.py)** — Convert vocabulary to CSV/XLSX
+- **[export_service.py](backend/services/export_service.py)** — Convert vocabulary to CSV/XLSX, and the personal library to an Anki-importable tab-separated deck (`to_anki_tsv`: Front=word, Back=meaning/definition/example HTML, plus tags/level; `#`-directives let Anki 2.1+ auto-map columns). Library export endpoint: `GET /api/library/export/{csv|xlsx|anki}`
 - **[word_family.py](backend/services/word_family.py)** — Map lemmas to derivational families (e.g., happy → happiness, happily)
 - **[word_relations.py](backend/services/word_relations.py)** — Related-word suggestions: same family, similar difficulty (CEFR + Zipf), library siblings, plus "gap" recommendations from the gaokao 3500 list that the user hasn't saved yet (offline, no LLM calls)
 - **[quiz_service.py](backend/services/quiz_service.py)** — Practice quiz generator + grader. Modes: `definition_to_word`, `word_to_definition`, `fill_in_blank`, `mixed`. Distractors come from peer library entries; scoring feeds into the existing `ReviewEvent`/heatmap pipeline.

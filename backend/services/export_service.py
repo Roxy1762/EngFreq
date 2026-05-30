@@ -187,3 +187,84 @@ def to_xlsx(result: AnalysisResult, selected_only: bool = False) -> bytes:
     buf = io.BytesIO()
     wb.save(buf)
     return buf.getvalue()
+
+
+# ── Anki deck export ──────────────────────────────────────────────────────────
+
+def _anki_field(text: object) -> str:
+    """Sanitise a value for a single Anki TSV field.
+
+    Tab and carriage-return are the column/row separators in a TSV import, so
+    they must never appear inside a field; newlines become ``<br>`` (the import
+    runs with ``#html:true``). Returns "" for None/empty.
+    """
+    if not text:
+        return ""
+    s = str(text)
+    return s.replace("\t", " ").replace("\r", " ").replace("\n", "<br>").strip()
+
+
+def _anki_tags(item: dict) -> str:
+    """Build a space-separated Anki tag string from a library row.
+
+    Anki tags are space-delimited, so any space inside a tag is collapsed to an
+    underscore. The word's CEFR/level is added as an extra tag for easy
+    filtering inside Anki.
+    """
+    tags: list[str] = []
+    for raw in (item.get("tags") or "").split(","):
+        t = raw.strip().replace(" ", "_")
+        if t:
+            tags.append(t)
+    level = item.get("cefr_level") or item.get("word_level")
+    if level:
+        tags.append(str(level).strip().replace(" ", "_"))
+    # Dedupe while preserving order.
+    seen: set[str] = set()
+    ordered = [t for t in tags if not (t in seen or seen.add(t))]
+    return " ".join(ordered)
+
+
+def to_anki_tsv(items: list[dict]) -> bytes:
+    """Render the user's library as an Anki-importable tab-separated deck.
+
+    Layout (one note per saved word):
+      * **Front** — the headword (plus part-of-speech, if known)
+      * **Back**  — Chinese meaning, English definition and an example sentence,
+                    laid out with simple HTML so the card is readable
+      * **Tags**  — the word's library tags + its CEFR/level
+
+    The leading ``#`` directives are understood by Anki 2.1+ so the columns and
+    tags map automatically on import — no manual field assignment needed.
+    """
+    out = io.StringIO()
+    out.write("#separator:tab\n")
+    out.write("#html:true\n")
+    out.write("#columns:Front\tBack\tTags\n")
+    out.write("#tags column:3\n")
+
+    for item in items:
+        headword = _anki_field(item.get("headword") or item.get("lemma"))
+        if not headword:
+            continue
+        pos = _anki_field(item.get("pos"))
+        front = f"{headword} <small>({pos})</small>" if pos else headword
+
+        back_parts: list[str] = []
+        meaning = _anki_field(item.get("chinese_meaning"))
+        if meaning:
+            back_parts.append(meaning)
+        definition = _anki_field(item.get("english_definition"))
+        if definition:
+            back_parts.append(f"<i>{definition}</i>")
+        example = _anki_field(item.get("example_sentence"))
+        if example:
+            back_parts.append(f"<br><span style='color:#666'>{example}</span>")
+        notes = _anki_field(item.get("notes"))
+        if notes:
+            back_parts.append(f"<br>{notes}")
+        back = "<br>".join(back_parts)
+
+        out.write(f"{front}\t{back}\t{_anki_tags(item)}\n")
+
+    return out.getvalue().encode("utf-8")

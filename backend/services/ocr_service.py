@@ -300,8 +300,10 @@ def ocr_pdf(path: Path) -> str:
         try:
             with tempfile.NamedTemporaryFile(suffix=f"_page_{index}.png", delete=False) as tmp:
                 tmp_path = Path(tmp.name)
-            img.save(tmp_path)
             try:
+                # Keep img.save inside the try so a save failure still unlinks
+                # the temp file instead of leaking it to disk.
+                img.save(tmp_path)
                 page_text = _ocr_image_core(tmp_path, img)
             finally:
                 tmp_path.unlink(missing_ok=True)

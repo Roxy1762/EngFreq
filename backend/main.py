@@ -425,11 +425,11 @@ def _get_dict_for_user_or_404(db: Session, dict_code: str, user: User) -> DictMo
 
 
 def _sync_task_result(task_id: str, result: AnalysisResult, dict_code: Optional[str] = None) -> None:
-    task = _task_store.get(task_id)
-    if task:
+    def _apply(task: TaskStatus) -> None:
         task.result = result
         if dict_code:
             task.dict_code = dict_code
+    _task_store.mutate(task_id, _apply)
 
 
 def _admin_overview_payload(db: Session) -> dict:
@@ -918,9 +918,12 @@ async def generate_vocab_endpoint(
 
                 # Apply the in-memory mutation only AFTER we've prepared the DB
                 # write, so a poll between vocab arrival and persistence still
-                # reflects a coherent state.
-                if task.result:
-                    task.result.vocab_table = vocab
+                # reflects a coherent state. Route through mutate() so the swap
+                # is atomic vs. a concurrent task-poll serialising task.result.
+                def _set_vocab(t: TaskStatus) -> None:
+                    if t.result:
+                        t.result.vocab_table = vocab
+                _task_store.mutate(task_id, _set_vocab)
 
                 if exam and task.result:
                     _persist_exam_result(db2, exam, task.result)
@@ -1147,13 +1150,24 @@ async def delete_vocab_entry(
     # state, so a 404 (typo) doesn't leave the in-memory and on-disk vocab
     # tables out of sync.
     target = headword.lower()
-    pruned = [
-        item for item in task.result.vocab_table
-        if item.headword.lower() != target and item.lemma.lower() != target
-    ]
-    if len(pruned) == len(task.result.vocab_table):
+
+    # Atomic read-modify-write under the store lock: filtering then reassigning
+    # outside the lock races a concurrent task-poll serialising the same table.
+    def _prune(t: TaskStatus) -> Optional[int]:
+        if not t.result:
+            return None
+        kept = [
+            item for item in t.result.vocab_table
+            if item.headword.lower() != target and item.lemma.lower() != target
+        ]
+        if len(kept) == len(t.result.vocab_table):
+            return None  # nothing matched
+        t.result.vocab_table = kept
+        return len(kept)
+
+    remaining = _task_store.mutate(task_id, _prune)
+    if remaining is None:
         raise HTTPException(404, "词汇不存在")
-    task.result.vocab_table = pruned
 
     if exam:
         _persist_exam_result(db, exam, task.result)
@@ -1324,9 +1338,10 @@ async def update_vocab_selection(
             meta = _task_store.get_meta(task_id)
             if meta.get("exam_id") != exam.id:
                 continue
-            task = _task_store.get(task_id)
-            if task and task.result:
-                task.result.vocab_table = vocab
+            def _set_selection(t: TaskStatus) -> None:
+                if t.result:
+                    t.result.vocab_table = vocab
+            _task_store.mutate(task_id, _set_selection)
 
     return {"ok": True, "updated": len(body.selections), "vocab_count": len(vocab)}
 
@@ -1815,9 +1830,21 @@ async def library_export(
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """Export the user's library to CSV/XLSX. Reuses the vocab export utilities."""
+    """Export the user's library to CSV / XLSX / Anki deck. Reuses the vocab
+    export utilities; Anki gets a dedicated tab-separated builder that preserves
+    tags and levels."""
     from backend.services import library_service
     items = library_service.list_library(db, user_id=user.id, limit=10_000)
+
+    fmt_lower = fmt.lower()
+    if fmt_lower == "anki":
+        from backend.services.export_service import to_anki_tsv
+        return Response(
+            content=to_anki_tsv(items),
+            media_type="text/tab-separated-values; charset=utf-8",
+            headers={"Content-Disposition": "attachment; filename=my_library_anki.txt"},
+        )
+
     # Adapt LibraryWord rows into VocabEntry for the existing exporter.
     vocab = []
     for item in items:
@@ -1854,7 +1881,7 @@ async def library_export(
             media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             headers={"Content-Disposition": "attachment; filename=my_library.xlsx"},
         )
-    raise HTTPException(400, "格式必须是 csv 或 xlsx")
+    raise HTTPException(400, "格式必须是 csv、xlsx 或 anki")
 
 
 # ── Feature 3: Spaced-repetition review queue ────────────────────────────────

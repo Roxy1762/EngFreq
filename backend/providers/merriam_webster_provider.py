@@ -90,7 +90,14 @@ def _parse(word: str, data: list) -> Optional[CachedDefinition]:
         for section in first.get("def", []):
             for sseq in section.get("sseq", []):
                 for sense in sseq:
+                    # MW's sseq mixes entry kinds: a "sense" has a dict at [1],
+                    # but "pseq"/"bs"/"sen" etc. can carry a list there. Guard
+                    # the dict access so a non-sense element doesn't raise
+                    # AttributeError (which isn't caught below) and abort
+                    # example extraction for the whole word.
                     if not isinstance(sense, list) or len(sense) < 2:
+                        continue
+                    if not isinstance(sense[1], dict):
                         continue
                     for dt_item in sense[1].get("dt", []):
                         if isinstance(dt_item, list) and dt_item[0] == "vis":

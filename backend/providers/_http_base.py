@@ -52,21 +52,29 @@ class HttpDictProviderBase(BaseVocabProvider):
 
         vocab: List[VocabEntry] = []
         real_hits = 0
+        error_count = 0
         for entry, result in zip(entries, results):
             if isinstance(result, VocabEntry):
                 vocab.append(result)
                 if result.source == self.name:
                     real_hits += 1
+                elif result.source.endswith("_error"):
+                    error_count += 1
             else:
                 logger.warning("%s failed for '%s': %s", self.name, entry.lemma, result)
                 vocab.append(self._stub(entry, reason=f"{self.name}_error"))
+                error_count += 1
 
-        # If the network is fully down or the API rate-limited every word,
-        # bubble up so the fallback chain promotes the next provider.
-        if entries and real_hits == 0:
+        # Only treat the provider as failed when *every* word errored out (the
+        # network is down or the API rate-limited the whole batch). A batch of
+        # legitimate misses — proper nouns, OCR noise, words this dictionary
+        # genuinely doesn't carry — is a valid result and must NOT demote the
+        # provider; otherwise an all-unknown batch would wrongly fall through
+        # the entire provider chain and fail vocab generation outright.
+        if entries and real_hits == 0 and error_count == len(entries):
             raise RuntimeError(
-                f"{self.name} returned no real definitions for any of "
-                f"{len(entries)} words — treating as provider failure"
+                f"{self.name} errored on all {len(entries)} words "
+                f"— treating as provider failure"
             )
         return vocab
 
